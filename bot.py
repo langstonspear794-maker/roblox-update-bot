@@ -7,6 +7,7 @@ then posts them to your server automatically.
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 
 import aiohttp
@@ -18,7 +19,7 @@ from discord.ext import tasks
 # ---------------------------------------------------------------------------
 # Configuration — edit these before running
 # ---------------------------------------------------------------------------
-BOT_TOKEN = "your token here"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "your token here")
 UPDATE_CHANNEL_ID = 0          # fallback channel; override with /set_update_channel
 CHECK_INTERVAL_MINUTES = 15
 # ---------------------------------------------------------------------------
