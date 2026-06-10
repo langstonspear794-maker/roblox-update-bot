@@ -31,14 +31,9 @@ cd roblox-update-bot
 ```bash
 pip install -r requirements.txt
 ```
-3. Configure the bot
-Open `bot.py` and edit the top section:
-```python
-BOT_TOKEN         = "your token here"
-UPDATE_CHANNEL_ID = 0        # or set via /set_update_channel
-CHECK_INTERVAL_MINUTES = 15
+
 ```
-4. Run the bot
+3. Run the bot
 ```bash
 python bot.py
 ```
