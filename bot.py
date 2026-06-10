@@ -75,6 +75,40 @@ class RobloxBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user.id)
 
+        channel = self.get_channel(self.update_channel_id)
+        if channel is not None:
+            client_ver, studio_ver = await asyncio.gather(
+                self.get_client_version(),
+                self.get_studio_version(),
+            )
+            now = datetime.now(timezone.utc)
+            embed = discord.Embed(
+                title="🚀 Roblox Update Tracker — Online",
+                description="Bot has connected. Here are the current live versions:",
+                colour=discord.Colour.blurple(),
+                timestamp=now,
+            )
+            embed.add_field(
+                name="🎮 Roblox Client",
+                value=f"`{client_ver}`" if client_ver else "*unavailable*",
+                inline=True,
+            )
+            embed.add_field(
+                name="🛠️ Roblox Studio",
+                value=f"`{studio_ver}`" if studio_ver else "*unavailable*",
+                inline=True,
+            )
+            embed.set_footer(
+                text=f"Polling for updates every {CHECK_INTERVAL_MINUTES} minutes"
+            )
+            await channel.send(embed=embed)
+            log.info(
+                "Startup version snapshot posted — client=%s studio=%s",
+                client_ver,
+                studio_ver,
+            )
+
+
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
@@ -256,18 +290,16 @@ bot = RobloxBot()
 async def cmd_roblox_version(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
     version = await bot.get_client_version()
+    embed = discord.Embed(
+        title="🎮 Roblox Client Version",
+        colour=discord.Colour.red(),
+        timestamp=datetime.now(timezone.utc),
+    )
     if version:
-        embed = discord.Embed(
-            title="🎮 Roblox Client Version",
-            description=f"`{version}`",
-            colour=discord.Colour.red(),
-        )
+        embed.add_field(name="Current Version", value=f"`{version}`", inline=False)
+        embed.set_footer(text="Live data from Roblox CDN")
     else:
-        embed = discord.Embed(
-            title="🎮 Roblox Client Version",
-            description="Could not retrieve version at this time.",
-            colour=discord.Colour.red(),
-        )
+        embed.description = "Could not retrieve version at this time."
     await interaction.followup.send(embed=embed)
 
 
@@ -275,18 +307,16 @@ async def cmd_roblox_version(interaction: discord.Interaction) -> None:
 async def cmd_studio_version(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
     version = await bot.get_studio_version()
+    embed = discord.Embed(
+        title="🛠️ Roblox Studio Version",
+        colour=discord.Colour.blue(),
+        timestamp=datetime.now(timezone.utc),
+    )
     if version:
-        embed = discord.Embed(
-            title="🛠️ Roblox Studio Version",
-            description=f"`{version}`",
-            colour=discord.Colour.blue(),
-        )
+        embed.add_field(name="Current Version", value=f"`{version}`", inline=False)
+        embed.set_footer(text="Live data from Roblox CDN")
     else:
-        embed = discord.Embed(
-            title="🛠️ Roblox Studio Version",
-            description="Could not retrieve version at this time.",
-            colour=discord.Colour.blue(),
-        )
+        embed.description = "Could not retrieve version at this time."
     await interaction.followup.send(embed=embed)
 
 
