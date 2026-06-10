@@ -24,7 +24,7 @@ Command	Description
 🚀 Setup
 1. Clone the repo
 ```bash
-git clone https://github.com/YOURUSERNAME/roblox-update-bot.git
+git clone https://github.com/langstonspear794-maker/roblox-update-bot.git
 cd roblox-update-bot
 ```
 2. Install dependencies
