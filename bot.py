@@ -1,6 +1,6 @@
 """
 Roblox Update Tracker Bot — Ultimate Edition
-(type-safe, ready for Replit)
+
 """
 
 import asyncio
