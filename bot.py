@@ -1212,7 +1212,83 @@ class RobloxBot(discord.Client):
     @check_tempvcs.before_loop
     async def before_tempvcs(self):
         await self.wait_until_ready()
+    # -----------------------------------------------------------------------
+    # Main polling
+    # -----------------------------------------------------------------------
+    @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
+    async def poll_updates(self) -> None:
+        self._last_check_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if time.time() < self._muted_until:
+            return
+        channel = self.get_channel(self.update_channel_id)
+        if not isinstance(channel, discord.abc.Messageable):
+            return
 
+        ping_content = ""
+        if PING_EVERYONE:
+            guild = channel.guild if isinstance(channel, discord.TextChannel) else None
+            if guild and self._ping_role_id:
+                role = guild.get_role(self._ping_role_id)
+                ping_content = f"{role.mention}\n" if role else "@everyone\n"
+            else:
+                ping_content = "@everyone\n"
+
+        now = datetime.now(timezone.utc)
+        ts = now.strftime("%B %d, %Y %I:%M %p")
+        date_str = now.strftime("%m/%d/%Y %I:%M %p")
+
+        if self._filters.get("client"):
+            cv = await self.get_client_version()
+            if cv and cv != self._last_client_version:
+                if self._last_client_version is not None:
+                    self._client_changelog.append({"version": cv, "time": self._last_check_time})
+                    self._client_changelog = self._client_changelog[-10:]
+                    em = discord.Embed(
+                        title="🚨 Roblox Update Detected!",
+                        description="This is a live update, Roblox is **patched**.",
+                        colour=0xe63946,
+                        timestamp=now,
+                    )
+                    em.add_field(name="Platform",     value="Windows",   inline=False)
+                    em.add_field(name="Version Hash", value=f"`{cv}`",   inline=False)
+                    em.add_field(name="Date",         value=ts,          inline=False)
+                    em.set_footer(text=date_str)
+                    await channel.send(content=ping_content, embed=em)
+                self._last_client_version = cv
+
+        if self._filters.get("devforum"):
+            posts = await self.get_devforum_posts(DEVFORUM_ANNOUNCEMENTS_URL, limit=1)
+            if posts:
+                latest = posts[0]
+                if latest["id"] != self._last_devforum_id:
+                    if self._last_devforum_id is not None:
+                        em = discord.Embed(title="📢 New DevForum Announcement",
+                                           description=f"[{latest['title']}]({latest['url']})",
+                                           colour=0xffd166, timestamp=now)
+                        em.set_footer(text="Roblox DevForum")
+                        await channel.send(content=ping_content, embed=em)
+                    self._last_devforum_id = latest["id"]
+
+        if self._filters.get("incident"):
+            incidents = await self.get_unresolved_incidents()
+            if incidents:
+                latest_inc = incidents[0]
+                if latest_inc["id"] != self._last_incident_id:
+                    if self._last_incident_id is not None:
+                        colors = {"none":0x06d6a0,"minor":0xffd166,"major":0xff6b35,"critical":0xe63946}
+                        em = discord.Embed(title=f"🚨 Roblox Incident: {latest_inc['name']}",
+                                           description=latest_inc["latest_update"],
+                                           colour=colors.get(latest_inc["impact"],0xaaa), timestamp=now)
+                        em.add_field(name="Status", value=latest_inc["status"].replace("_"," ").title(), inline=True)
+                        em.add_field(name="Impact", value=latest_inc["impact"].title(), inline=True)
+                        em.add_field(name="Details", value=f"[View]({latest_inc['url']})", inline=False)
+                        em.set_footer(text="status.roblox.com")
+                        await channel.send(content=ping_content, embed=em)
+                    self._last_incident_id = latest_inc["id"]
+
+    @poll_updates.before_loop
+    async def before_poll(self) -> None:
+        await self.wait_until_ready()
     # -----------------------------------------------------------------------
     # Setup hook
     # -----------------------------------------------------------------------
