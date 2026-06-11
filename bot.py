@@ -3723,7 +3723,7 @@ async def cmd_help(interaction: discord.Interaction) -> None:
             ("/set_admin_role", "Set role that can use admin commands (Admin)"),
             ("/sync", "Force re-sync all commands to this server (Admin)"),
         ],
-            "✨ Server Management": [
+        "✨ Server Management": [
             ("/setwelcome",        "Set welcome channel & message (Admin)"),
             ("/verify",            "Send a verification panel"),
             ("/setverifiedrole",   "Set the role given by verification (Admin)"),
@@ -3736,6 +3736,12 @@ async def cmd_help(interaction: discord.Interaction) -> None:
             ("/tempvc",            "Create a temporary voice channel (Admin)"),
             ("/ask",               "Ask the AI anything"),
         ],
+    }
+    for category, cmds in categories.items():
+        val = "\n".join([f"`{n}` — {d}" for n,d in cmds])
+        em.add_field(name=category, value=val, inline=False)
+    em.set_footer(text=f"Polls every {CHECK_INTERVAL_MINUTES} min • @everyone pings {'on' if PING_EVERYONE else 'off'}")
+    await interaction.response.send_message(embed=em)
 # ---------------------------------------------------------------------------
 # 🔨 Moderation (Slash)
 # ---------------------------------------------------------------------------
