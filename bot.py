@@ -3723,18 +3723,19 @@ async def cmd_help(interaction: discord.Interaction) -> None:
             ("/set_admin_role", "Set role that can use admin commands (Admin)"),
             ("/sync", "Force re-sync all commands to this server (Admin)"),
         ],
-        "✨ Server Management": [
-            ("/setwelcome", "Set welcome channel & message (Admin)"),
-            ("/verify", "Send a verification panel"),
-            ("/setverifiedrole", "Set the role given by verification (Admin)"),
-            ("/suggest", "Submit a suggestion"),
+            "✨ Server Management": [
+            ("/setwelcome",        "Set welcome channel & message (Admin)"),
+            ("/verify",            "Send a verification panel"),
+            ("/setverifiedrole",   "Set the role given by verification (Admin)"),
+            ("/suggest",           "Submit a suggestion"),
             ("/setsuggestchannel", "Set suggestion channel (Admin)"),
-            ("/reactionrole", "Add/remove reaction roles (Admin)"),
-            ("/ticket", "Create a ticket channel"),
-            ("/close", "Close a ticket channel"),
-            ("/giveaway", "Start a giveaway (Mod)"),
-            ("/tempvc", "Create a temporary voice channel (Admin)"),
-            ("/ask", "Ask the AI anything"),
+            ("/reactionrole",      "Add/remove reaction roles (Admin)"),
+            ("/ticket",            "Create a ticket channel"),
+            ("/close",             "Close a ticket channel"),
+            ("/giveaway",          "Start a giveaway (Mod)"),
+            ("/tempvc",            "Create a temporary voice channel (Admin)"),
+            ("/ask",               "Ask the AI anything"),
+        ],
 # ---------------------------------------------------------------------------
 # 🔨 Moderation (Slash)
 # ---------------------------------------------------------------------------
