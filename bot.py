@@ -1,10 +1,10 @@
-cat > /mnt/user-data/outputs/roblox_update_bot/bot.py << 'BOTEOF'
 """
 Roblox Update Tracker Bot — Ultimate Edition
 """
 
 import asyncio
 import collections
+# ... rest of your code
 import json
 import logging
 import os
@@ -1768,20 +1768,18 @@ async def cmd_help(interaction: discord.Interaction):
     em.set_footer(text=f"Polls every {CHECK_INTERVAL_MINUTES} min")
     await interaction.response.send_message(embed=em)
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 # Entry point
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     try:
         bot.run(BOT_TOKEN)
     except discord.errors.PrivilegedIntentsRequired:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("❌ PRIVILEGED INTENTS REQUIRED")
         print("Enable in Discord Dev Portal → Bot → Privileged Gateway Intents:")
         print("  • Message Content Intent")
         print("  • Server Members Intent")
-        print("="*60 + "\n")
-BOTEOF
-Output
+        print("=" * 60 + "\n")
 
-exit code 0
+
