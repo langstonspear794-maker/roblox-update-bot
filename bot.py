@@ -1,9 +1,5 @@
 """
 Roblox Update Tracker Bot — Ultimate Edition
-(type‑safe, prefix + slash commands, full server management)
-Now with chatbot (no API key) and DM ticket creation.
-All background loops present – poll_updates, rotate_presence, etc.
-"""
 
 import asyncio
 import collections
