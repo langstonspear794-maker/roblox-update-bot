@@ -1,6 +1,6 @@
 """
 Roblox Update Tracker Bot — Ultimate Edition
-(type‑safe, ready for Replit / Railway)
+(type‑safe, prefix + slash commands, full server management)
 """
 
 import asyncio
@@ -8,6 +8,7 @@ import collections
 import json
 import logging
 import os
+import random
 import re
 import time
 import typing
@@ -69,9 +70,7 @@ DEFAULT_BAD_WORDS = [
 def _normalize(text: str) -> str:
     text = text.lower().translate(LEET_MAP)
     text = re.sub(r'[^a-z0-9\s]', '', text)
-    # collapse repeated letters (fuuuck → fuck)
     text = re.sub(r'(.)\1{2,}', r'\1\1', text)
-    # collapse spaced-out letters (f u c k → fuck)
     text = re.sub(r'(?<!\w)(\w)\s+(?=(\w\s)*\w(?!\w))', r'\1', text)
     return text
 
@@ -92,6 +91,7 @@ class RobloxBot(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
@@ -124,15 +124,23 @@ class RobloxBot(discord.Client):
         self._join_times: collections.deque[float] = collections.deque()
         self._mod_role_id: int | None = None
         self._admin_role_id: int | None = None
-        # ----- AUTO-MOD ENABLED BY DEFAULT -----
         self._automod_enabled: bool = True
         self._automod_words: list[str] = list(DEFAULT_BAD_WORDS)
         self._automod_strikes: dict[str, int] = {}
         self._automod_penalty: str = "timeout_week"
         self._automod_log: list[dict] = []
         self._reports: list[dict] = []
-        # ----- Banned users list (7‑day expiry) -----
-        self._banned_users: dict[str, dict] = {}   # user_id (str) -> {user, reason, banned_by, timestamp}
+        self._banned_users: dict[str, dict] = {}
+
+        # Server management extras
+        self._welcome_channel_id: int | None = None
+        self._welcome_message: str = "Welcome {mention} to **{server}**! Enjoy your stay."
+        self._verified_role_id: int | None = None
+        self._suggestion_channel_id: int | None = None
+        self._reaction_roles: dict[str, dict[str, int]] = {}  # msg_id -> {emoji: role_id}
+        self._giveaways: dict[int, dict] = {}
+        self._temp_vcs: dict[int, dict] = {}
+        self._ticket_counter: int = 0
 
         self._load_data()
         self._cleanup_banned_users()
@@ -173,6 +181,22 @@ class RobloxBot(discord.Client):
             for uid, data in raw_banned.items():
                 data["timestamp"] = float(data.get("timestamp", 0))
                 self._banned_users[uid] = data
+            self._welcome_channel_id    = d.get("welcome_channel_id")
+            self._welcome_message       = d.get("welcome_message", self._welcome_message)
+            self._verified_role_id      = d.get("verified_role_id")
+            self._suggestion_channel_id = d.get("suggestion_channel_id")
+            self._reaction_roles        = d.get("reaction_roles", {})
+            raw_giveaways = d.get("giveaways", {})
+            self._giveaways = {}
+            for mid, gdata in raw_giveaways.items():
+                gdata["end_time"] = float(gdata.get("end_time", 0))
+                self._giveaways[int(mid)] = gdata
+            raw_tempvcs = d.get("temp_vcs", {})
+            self._temp_vcs = {}
+            for cid, vcdata in raw_tempvcs.items():
+                vcdata["expires"] = float(vcdata.get("expires", 0))
+                self._temp_vcs[int(cid)] = vcdata
+            self._ticket_counter = d.get("ticket_counter", 0)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -202,6 +226,14 @@ class RobloxBot(discord.Client):
                     "automod_log":        self._automod_log[-100:],
                     "reports":            self._reports[-200:],
                     "banned_users":       self._banned_users,
+                    "welcome_channel_id": self._welcome_channel_id,
+                    "welcome_message":    self._welcome_message,
+                    "verified_role_id":   self._verified_role_id,
+                    "suggestion_channel_id": self._suggestion_channel_id,
+                    "reaction_roles":     self._reaction_roles,
+                    "giveaways":          self._giveaways,
+                    "temp_vcs":           self._temp_vcs,
+                    "ticket_counter":     self._ticket_counter,
                 }, f, indent=2)
         except Exception as e:
             log.warning("Failed to save data: %s", e)
@@ -214,56 +246,6 @@ class RobloxBot(discord.Client):
             del self._banned_users[uid]
         if expired:
             self._save_data()
-
-    def _add_audit(self, action: str, user: discord.User | discord.Member, detail: str = "") -> None:
-        self._audit_log.append({
-            "time":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "action": action,
-            "by":     f"{user} ({user.id})",
-            "detail": detail,
-        })
-        self._audit_log = self._audit_log[-200:]
-        self._save_data()
-
-    async def _log_action(self, embed: discord.Embed) -> None:
-        if self._log_channel_id:
-            ch = self.get_channel(self._log_channel_id)
-            if isinstance(ch, discord.abc.Messageable):
-                try:
-                    await ch.send(embed=embed)
-                except Exception:
-                    pass
-
-    async def setup_hook(self) -> None:
-        self.poll_updates.start()
-        self.rotate_presence.start()
-        self.poll_ugc_prices.start()
-        self.check_scheduled.start()
-
-    async def on_ready(self) -> None:
-        if not self.user:
-            return
-        self._start_time = time.time()
-        log.info("Logged in as %s (%s)", self.user, self.user.id)
-        for guild in self.guilds:
-            try:
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
-                log.info("Synced commands to guild %s (%s)", guild.name, guild.id)
-            except Exception as e:
-                log.warning("Failed to sync to guild %s: %s", guild.id, e)
-        channel = self.get_channel(self.update_channel_id)
-        if isinstance(channel, discord.abc.Messageable):
-            cv = await self.get_client_version()
-            em = discord.Embed(
-                title="🚀 Roblox Update Tracker — Online",
-                description="Bot is online and monitoring for updates!",
-                colour=0x4cc9f0,
-                timestamp=datetime.now(timezone.utc),
-            )
-            em.add_field(name="🎮 Client", value=f"`{cv or 'N/A'}`", inline=True)
-            em.set_footer(text=f"Polling every {CHECK_INTERVAL_MINUTES} min")
-            await channel.send(embed=em)
 
     # -----------------------------------------------------------------------
     # HTTP helpers
@@ -423,8 +405,7 @@ class RobloxBot(discord.Client):
                 continue
             direction = "📈 UP" if change > 0 else "📉 DOWN"
             color = 0x06d6a0 if change > 0 else 0xe63946
-            em = discord.Embed(title=f"{direction} — UGC Price Change!", colour=color,
-                               timestamp=datetime.now(timezone.utc))
+            em = discord.Embed(title=f"{direction} — UGC Price Change!", colour=color, timestamp=datetime.now(timezone.utc))
             em.description = f"**[{info.get('name','Item')}](https://www.roblox.com/catalog/{asset_id})**"
             em.add_field(name="Old Price", value=f"R${old_price:,}", inline=True)
             em.add_field(name="New Price", value=f"R${new_price:,}", inline=True)
@@ -472,7 +453,6 @@ class RobloxBot(discord.Client):
         if len(remaining) != len(self._scheduled):
             self._scheduled = remaining
             self._save_data()
-        # Also periodically clean up old banned users
         self._cleanup_banned_users()
 
     @check_scheduled.before_loop
@@ -548,164 +528,734 @@ class RobloxBot(discord.Client):
                 except Exception as e:
                     log.warning("Auto-role failed for %s: %s", member, e)
 
+        # Welcome message
+        if self._welcome_channel_id and self._welcome_message:
+            ch = member.guild.get_channel(self._welcome_channel_id)
+            if isinstance(ch, discord.TextChannel):
+                msg = self._welcome_message.format(mention=member.mention, server=member.guild.name, user=member.display_name)
+                try:
+                    await ch.send(msg)
+                except discord.Forbidden:
+                    pass
+
     # -----------------------------------------------------------------------
-    # Auto-mod
+    # Auto-mod + prefix handler
     # -----------------------------------------------------------------------
     async def on_message(self, message: discord.Message) -> None:
+        # Auto-mod check
         if message.author.bot or not self._automod_enabled:
+            pass  # skip automod if not enabled, but still handle commands
+        else:
+            guild = message.guild
+            if guild and isinstance(message.author, discord.Member):
+                content = message.content
+                if content:
+                    normalized = _normalize(content)
+                    triggered_word = next((w for w in self._automod_words if w in normalized), None)
+                    if triggered_word:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+                        uid = str(message.author.id)
+                        self._automod_strikes[uid] = self._automod_strikes.get(uid, 0) + 1
+                        strikes = self._automod_strikes[uid]
+                        import datetime as dt
+                        member = message.author
+                        try:
+                            if strikes >= 3:
+                                if self._automod_penalty == "kick":
+                                    await member.kick(reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
+                                    action_text = "**Kicked** from the server"
+                                    self._automod_strikes[uid] = 0
+                                else:
+                                    until = discord.utils.utcnow() + dt.timedelta(days=7)
+                                    await member.timeout(until, reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
+                                    action_text = "**Timed out for 7 days**"
+                                color = 0xe63946
+                            else:
+                                until = discord.utils.utcnow() + dt.timedelta(minutes=10)
+                                await member.timeout(until, reason=f"Auto-mod: profanity (strike {strikes}/3)")
+                                action_text = "**Timed out for 10 minutes**"
+                                color = 0xffd166
+                        except discord.Forbidden:
+                            action_text = "⚠️ Could not punish (missing permissions)"
+                            color = 0xaaaaaa
+                        warn_em = discord.Embed(
+                            title="🤬 Language Warning",
+                            description=(
+                                f"{member.mention} your message was removed for inappropriate language.\n"
+                                f"Strike **{strikes}/3** — {action_text}."
+                            ),
+                            colour=color,
+                            timestamp=datetime.now(timezone.utc),
+                        )
+                        warn_em.set_footer(text="3 strikes = kick or 7-day timeout")
+                        try:
+                            await message.channel.send(embed=warn_em, delete_after=15)
+                        except Exception:
+                            pass
+                        log_em = discord.Embed(title="🤬 Auto-mod: Profanity Detected", colour=color,
+                                               timestamp=datetime.now(timezone.utc))
+                        log_em.add_field(name="Member",  value=f"{member} ({member.id})", inline=True)
+                        log_em.add_field(name="Strikes", value=f"{strikes}/3",            inline=True)
+                        log_em.add_field(name="Action",  value=action_text,               inline=True)
+                        log_em.add_field(name="Channel", value=message.channel.mention,   inline=True)
+                        await self._log_action(log_em)
+                        self._automod_log.append({
+                            "ts":      datetime.now(timezone.utc).isoformat(),
+                            "user":    f"{member} ({member.id})",
+                            "uid":     str(member.id),
+                            "word":    triggered_word,
+                            "strikes": strikes,
+                            "action":  action_text,
+                            "channel": str(message.channel),
+                        })
+                        self._automod_log = self._automod_log[-100:]
+                        self._save_data()
+                        return  # don't process as command
+
+        # Prefix command handling (if not bot and in guild)
+        if message.author.bot or not message.guild:
             return
+        content = message.content.strip()
+        if not content.startswith(self._prefix):
+            return
+
+        cmd, *args = content[len(self._prefix):].split()
+        cmd = cmd.lower()
+        channel = message.channel
+        author = message.author
         guild = message.guild
-        if not guild or not isinstance(message.author, discord.Member):
-            return
-        content = message.content
-        if not content:
-            return
-        normalized = _normalize(content)
-        triggered_word = next((w for w in self._automod_words if w in normalized), None)
-        if not triggered_word:
-            return
-        try:
+
+        async def send_embed(title, description, color=0x4cc9f0):
+            em = discord.Embed(title=title, description=description, colour=color)
+            await channel.send(embed=em)
+
+        def is_mod():
+            return (author.guild_permissions.administrator or
+                    (self._mod_role_id and guild.get_role(self._mod_role_id) in author.roles) or
+                    (self._admin_role_id and guild.get_role(self._admin_role_id) in author.roles) or
+                    author.guild_permissions.manage_messages or author.guild_permissions.kick_members or
+                    author.guild_permissions.ban_members or author.guild_permissions.moderate_members)
+
+        def is_admin():
+            return (author.guild_permissions.administrator or
+                    (self._admin_role_id and guild.get_role(self._admin_role_id) in author.roles))
+
+        # ----- Moderation Commands -----
+        if cmd == "kick":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}kick @member [reason]")
+            member = await self._get_member_from_mention(guild, args[0])
+            if not member:
+                return await send_embed("❌ Error", "Member not found.")
+            reason = " ".join(args[1:]) if len(args) > 1 else "No reason provided"
+            anon = "-a" in args or "--anonymous" in args
+            if anon:
+                reason = reason.replace("-a", "").replace("--anonymous", "").strip()
+            try:
+                dm_content = f"You have been **kicked** from **{guild.name}**.\nReason: {reason}" if anon else f"You have been **kicked** from **{guild.name}** by {author.mention}.\nReason: {reason}"
+                try:
+                    await member.send(dm_content)
+                except discord.Forbidden:
+                    pass
+                await member.kick(reason=reason)
+                await send_embed("👢 Member Kicked", f"{member} kicked.\nReason: {reason}")
+            except discord.Forbidden:
+                await send_embed("❌ Error", "I don't have permission to kick that member.", 0xe63946)
+
+        elif cmd == "ban":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}ban @member [reason]")
+            member = await self._get_member_from_mention(guild, args[0])
+            if not member:
+                return await send_embed("❌ Error", "Member not found.")
+            reason = " ".join(args[1:]) if len(args) > 1 else "No reason provided"
+            anon = "-a" in args or "--anonymous" in args
+            if anon:
+                reason = reason.replace("-a", "").replace("--anonymous", "").strip()
+            try:
+                dm_content = f"You have been **banned** from **{guild.name}**.\nReason: {reason}" if anon else f"You have been **banned** from **{guild.name}** by {author.mention}.\nReason: {reason}"
+                try:
+                    await member.send(dm_content)
+                except discord.Forbidden:
+                    pass
+                await member.ban(reason=reason, delete_message_days=0)
+                self._banned_users[str(member.id)] = {
+                    "user": str(member), "reason": reason,
+                    "banned_by": "Anonymous" if anon else str(author), "timestamp": time.time()
+                }
+                self._save_data()
+                await send_embed("🔨 Member Banned", f"{member} banned.\nReason: {reason}")
+            except discord.Forbidden:
+                await send_embed("❌ Error", "I don't have permission to ban that member.", 0xe63946)
+
+        elif cmd == "unban":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}unban <user_id>")
+            user_id = args[0]
+            try:
+                user = await self.fetch_user(int(user_id))
+                await guild.unban(user, reason=f"Unbanned by {author}")
+                if user_id in self._banned_users:
+                    del self._banned_users[user_id]
+                    self._save_data()
+                await send_embed("🔓 Unbanned", f"Unbanned {user}")
+            except discord.NotFound:
+                await send_embed("❌ Error", "User not found in ban list.", 0xe63946)
+            except discord.Forbidden:
+                await send_embed("❌ Error", "I don't have permission to unban.", 0xe63946)
+
+        elif cmd == "timeout":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            if len(args) < 2:
+                return await send_embed("Usage", f"{self._prefix}timeout @member <minutes> [reason]")
+            member = await self._get_member_from_mention(guild, args[0])
+            if not member:
+                return await send_embed("❌ Error", "Member not found.")
+            try:
+                minutes = int(args[1])
+            except ValueError:
+                return await send_embed("❌ Error", "Minutes must be a number.")
+            reason = " ".join(args[2:]) if len(args) > 2 else "No reason provided"
+            until = discord.utils.utcnow() + __import__("datetime").timedelta(minutes=minutes)
+            try:
+                await member.timeout(until, reason=reason)
+                await send_embed("⏱️ Timed Out", f"{member} timed out for {minutes} min.\nReason: {reason}")
+            except discord.Forbidden:
+                await send_embed("❌ Error", "I don't have permission to timeout that member.", 0xe63946)
+
+        elif cmd == "warn":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            if len(args) < 2:
+                return await send_embed("Usage", f"{self._prefix}warn @member <reason>")
+            member = await self._get_member_from_mention(guild, args[0])
+            if not member:
+                return await send_embed("❌ Error", "Member not found.")
+            reason = " ".join(args[1:])
+            uid = str(member.id)
+            entry = {"reason": reason, "by": str(author), "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
+            self._warnings.setdefault(uid, []).append(entry)
+            self._save_data()
+            await send_embed("⚠️ Warned", f"{member} warned: {reason}")
+
+        elif cmd == "warnings":
+            if len(args) < 1:
+                member = author
+            else:
+                member = await self._get_member_from_mention(guild, args[0])
+                if not member:
+                    return await send_embed("❌ Error", "Member not found.")
+            uid = str(member.id)
+            warns = self._warnings.get(uid, [])
+            if not warns:
+                return await send_embed("✅ No warnings", f"{member} has no warnings.")
+            em = discord.Embed(title=f"Warnings for {member}", colour=0xffd166)
+            for i, w in enumerate(warns, 1):
+                em.add_field(name=f"#{i} - {w['time']}", value=f"Reason: {w['reason']}\nBy: {w['by']}", inline=False)
+            await channel.send(embed=em)
+
+        elif cmd == "clearwarnings":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}clearwarnings @member")
+            member = await self._get_member_from_mention(guild, args[0])
+            if not member:
+                return await send_embed("❌ Error", "Member not found.")
+            uid = str(member.id)
+            count = len(self._warnings.pop(uid, []))
+            self._save_data()
+            await send_embed("✅ Warnings Cleared", f"Cleared {count} warnings for {member}")
+
+        elif cmd == "bannedlist":
+            self._cleanup_banned_users()
+            if not self._banned_users:
+                return await send_embed("📜 Banned List", "No users banned recently.")
+            entries = sorted(self._banned_users.values(), key=lambda x: x["timestamp"], reverse=True)
+            em = discord.Embed(title="Recently Banned Users", colour=0xff6b35)
+            for entry in entries[:10]:
+                ts = int(entry["timestamp"])
+                em.add_field(name=entry["user"], value=f"Reason: {entry['reason']}\nBanned by: {entry['banned_by']}\nWhen: <t:{ts}:R>", inline=False)
+            await channel.send(embed=em)
+
+        # ----- Utility Commands -----
+        elif cmd == "purge":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}purge <amount>")
+            try:
+                amount = int(args[0])
+            except ValueError:
+                return await send_embed("❌ Error", "Amount must be a number.")
+            if not 1 <= amount <= 100:
+                return await send_embed("❌ Error", "Amount must be between 1 and 100.")
             await message.delete()
-        except Exception:
-            pass
-        uid = str(message.author.id)
-        self._automod_strikes[uid] = self._automod_strikes.get(uid, 0) + 1
-        strikes = self._automod_strikes[uid]
-        import datetime as dt
-        member = message.author
-        try:
-            if strikes >= 3:
-                if self._automod_penalty == "kick":
-                    await member.kick(reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
-                    action_text = "**Kicked** from the server"
-                    self._automod_strikes[uid] = 0
+            deleted = await channel.purge(limit=amount)
+            await channel.send(f"🗑️ Deleted {len(deleted)} messages.", delete_after=5)
+
+        elif cmd == "announce":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            try:
+                parts = content[len(self._prefix)+len("announce "):].split("|", 1)
+                title = parts[0].strip()
+                message_body = parts[1].strip() if len(parts) > 1 else ""
+            except Exception:
+                return await send_embed("Usage", f"{self._prefix}announce Title | Message")
+            em = discord.Embed(title=title, description=message_body, colour=0x4cc9f0)
+            await channel.send(embed=em)
+            await message.delete()
+
+        elif cmd == "poll":
+            try:
+                regex = re.findall(r'"([^"]*)"', content)
+                if len(regex) < 3:
+                    return await send_embed("Usage", f'{self._prefix}poll "Question" "Option A" "Option B"')
+                question, opt_a, opt_b = regex[0], regex[1], regex[2]
+                em = discord.Embed(title=f"📊 {question}", colour=0x4cc9f0)
+                em.add_field(name="🅰️", value=opt_a, inline=True)
+                em.add_field(name="🅱️", value=opt_b, inline=True)
+                msg = await channel.send(embed=em)
+                await msg.add_reaction("🅰️")
+                await msg.add_reaction("🅱️")
+                await message.delete()
+            except Exception as e:
+                await send_embed("Error", str(e))
+
+        # ----- Server Management Prefix Commands -----
+        elif cmd == "setwelcome":
+            if not is_admin():
+                return await send_embed("❌ Permission Denied", "You need admin permissions.", 0xe63946)
+            try:
+                params = " ".join(args)
+                if "|" in params:
+                    ch_str, msg_part = params.split("|", 1)
+                    ch = await self._get_channel_from_mention(guild, ch_str.strip())
+                    if ch:
+                        self._welcome_channel_id = ch.id
+                    else:
+                        return await send_embed("❌ Error", "Invalid channel.")
+                    self._welcome_message = msg_part.strip()
                 else:
-                    until = discord.utils.utcnow() + dt.timedelta(days=7)
-                    await member.timeout(until, reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
-                    action_text = "**Timed out for 7 days**"
-                color = 0xe63946
+                    self._welcome_message = params
+                self._save_data()
+                await send_embed("✅ Welcome Message Set", f"Channel: {f'<#{self._welcome_channel_id}>' if self._welcome_channel_id else 'current'}\nMessage: {self._welcome_message}")
+            except Exception as e:
+                await send_embed("Error", str(e))
+
+        elif cmd == "setverifiedrole":
+            if not is_admin():
+                return await send_embed("❌ Permission Denied", "You need admin permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}setverifiedrole @role")
+            role = await self._get_role_from_mention(guild, args[0])
+            if not role:
+                return await send_embed("❌ Error", "Role not found.")
+            self._verified_role_id = role.id
+            self._save_data()
+            await send_embed("✅ Verified Role Set", f"Verified role: {role.mention}")
+
+        elif cmd == "setsuggest":
+            if not is_admin():
+                return await send_embed("❌ Permission Denied", "You need admin permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}setsuggest #channel")
+            ch = await self._get_channel_from_mention(guild, args[0])
+            if not ch:
+                return await send_embed("❌ Error", "Channel not found.")
+            self._suggestion_channel_id = ch.id
+            self._save_data()
+            await send_embed("✅ Suggestion Channel Set", f"Suggestions will go to {ch.mention}")
+
+        elif cmd == "suggest":
+            if not self._suggestion_channel_id:
+                return await send_embed("❌ Error", "Suggestion channel not configured.")
+            suggestion_ch = guild.get_channel(self._suggestion_channel_id)
+            if not suggestion_ch or not isinstance(suggestion_ch, discord.TextChannel):
+                return await send_embed("❌ Error", "Suggestion channel not found.")
+            text = " ".join(args)
+            if not text:
+                return await send_embed("Usage", f"{self._prefix}suggest <your suggestion>")
+            em = discord.Embed(description=text, colour=0x9b5de5, timestamp=datetime.now(timezone.utc))
+            em.set_author(name=f"Suggestion by {author.display_name}", icon_url=author.display_avatar.url)
+            msg = await suggestion_ch.send(embed=em)
+            await msg.add_reaction("👍")
+            await msg.add_reaction("👎")
+            await send_embed("✅ Suggestion Sent", f"Your suggestion has been posted in {suggestion_ch.mention}")
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        elif cmd == "verify":
+            if not self._verified_role_id:
+                return await send_embed("❌ Error", "Verified role not set. Admins use `!setverifiedrole`.")
+            role = guild.get_role(self._verified_role_id)
+            if not role:
+                return await send_embed("❌ Error", "Verified role not found.")
+            view = discord.ui.View()
+            btn = discord.ui.Button(label="Verify", style=discord.ButtonStyle.green)
+            async def verify_callback(interaction: discord.Interaction):
+                if role in interaction.user.roles:
+                    await interaction.response.send_message("You are already verified.", ephemeral=True)
+                    return
+                try:
+                    await interaction.user.add_roles(role)
+                    await interaction.response.send_message("✅ You are now verified!", ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.response.send_message("❌ I can't assign roles.", ephemeral=True)
+            btn.callback = verify_callback
+            view.add_item(btn)
+            em = discord.Embed(title="Verification", description="Click the button below to verify yourself.", colour=0x06d6a0)
+            await channel.send(embed=em, view=view)
+            await message.delete()
+
+        elif cmd == "reactionrole":
+            if not is_admin():
+                return await send_embed("❌ Permission Denied", "You need admin permissions.", 0xe63946)
+            if len(args) < 2:
+                return await send_embed("Usage", f"{self._prefix}reactionrole add <channel> <message_id> <emoji> <role>\n{self._prefix}reactionrole remove <message_id> <emoji>")
+            action = args[0].lower()
+            if action == "add":
+                if len(args) < 5:
+                    return await send_embed("Usage", f"{self._prefix}reactionrole add <channel> <message_id> <emoji> <role>")
+                ch = await self._get_channel_from_mention(guild, args[1])
+                if not ch:
+                    return await send_embed("❌ Error", "Invalid channel.")
+                try:
+                    msg_id = int(args[2])
+                except ValueError:
+                    return await send_embed("❌ Error", "Message ID must be a number.")
+                emoji = args[3]
+                role = await self._get_role_from_mention(guild, args[4])
+                if not role:
+                    return await send_embed("❌ Error", "Role not found.")
+                msg = await ch.fetch_message(msg_id)
+                try:
+                    await msg.add_reaction(emoji)
+                except Exception:
+                    return await send_embed("❌ Error", "Cannot add that emoji.")
+                self._reaction_roles.setdefault(str(msg_id), {})[emoji] = role.id
+                self._save_data()
+                await send_embed("✅ Reaction Role Added", f"React with {emoji} to get {role.mention}")
+            elif action == "remove":
+                if len(args) < 3:
+                    return await send_embed("Usage", f"{self._prefix}reactionrole remove <message_id> <emoji>")
+                try:
+                    msg_id = int(args[1])
+                except ValueError:
+                    return await send_embed("❌ Error", "Message ID must be a number.")
+                emoji = args[2]
+                if str(msg_id) in self._reaction_roles and emoji in self._reaction_roles[str(msg_id)]:
+                    del self._reaction_roles[str(msg_id)][emoji]
+                    if not self._reaction_roles[str(msg_id)]:
+                        del self._reaction_roles[str(msg_id)]
+                    self._save_data()
+                    await send_embed("✅ Removed", f"Reaction role removed for emoji {emoji}")
+                else:
+                    await send_embed("❌ Error", "That reaction role does not exist.")
             else:
-                until = discord.utils.utcnow() + dt.timedelta(minutes=10)
-                await member.timeout(until, reason=f"Auto-mod: profanity (strike {strikes}/3)")
-                action_text = "**Timed out for 10 minutes**"
-                color = 0xffd166
-        except discord.Forbidden:
-            action_text = "⚠️ Could not punish (missing permissions)"
-            color = 0xaaaaaa
+                await send_embed("❌ Error", "Unknown action. Use `add` or `remove`.")
 
-        warn_em = discord.Embed(
-            title="🤬 Language Warning",
-            description=(
-                f"{member.mention} your message was removed for inappropriate language.\n"
-                f"Strike **{strikes}/3** — {action_text}."
-            ),
-            colour=color,
-            timestamp=datetime.now(timezone.utc),
-        )
-        warn_em.set_footer(text="3 strikes = kick or 7-day timeout")
-        try:
-            await message.channel.send(embed=warn_em, delete_after=15)
-        except Exception:
-            pass
+        elif cmd == "ticket":
+            reason = " ".join(args) if args else "No reason specified"
+            self._ticket_counter += 1
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+            if self._mod_role_id:
+                mod_role = guild.get_role(self._mod_role_id)
+                if mod_role:
+                    overwrites[mod_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            if self._admin_role_id:
+                admin_role = guild.get_role(self._admin_role_id)
+                if admin_role:
+                    overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            category = discord.utils.get(guild.categories, name="Tickets")
+            if category is None:
+                try:
+                    category = await guild.create_category("Tickets")
+                except discord.Forbidden:
+                    return await send_embed("❌ Error", "I can't create a category.")
+            try:
+                ticket_ch = await guild.create_text_channel(
+                    name=f"ticket-{self._ticket_counter}",
+                    category=category,
+                    overwrites=overwrites
+                )
+            except discord.Forbidden:
+                return await send_embed("❌ Error", "I can't create channels.")
+            em = discord.Embed(title="📩 Ticket Created", description=f"Hello {author.mention}, your ticket has been created.\nReason: {reason}\nStaff will be with you soon.\nType `{self._prefix}close` to close this ticket.", colour=0x4cc9f0)
+            await ticket_ch.send(embed=em)
+            self._save_data()
+            await send_embed("✅ Ticket Created", f"Your ticket channel: {ticket_ch.mention}")
 
-        log_em = discord.Embed(title="🤬 Auto-mod: Profanity Detected", colour=color,
-                               timestamp=datetime.now(timezone.utc))
-        log_em.add_field(name="Member",  value=f"{member} ({member.id})", inline=True)
-        log_em.add_field(name="Strikes", value=f"{strikes}/3",            inline=True)
-        log_em.add_field(name="Action",  value=action_text,               inline=True)
-        log_em.add_field(name="Channel", value=message.channel.mention,   inline=True)
-        await self._log_action(log_em)
+        elif cmd == "close":
+            if not isinstance(channel, discord.TextChannel) or not channel.name.startswith("ticket-"):
+                return await send_embed("❌ Error", "This is not a ticket channel.")
+            try:
+                await channel.delete(reason="Ticket closed.")
+            except discord.Forbidden:
+                await send_embed("❌ Error", "I don't have permission to delete this channel.")
 
-        self._automod_log.append({
-            "ts":      datetime.now(timezone.utc).isoformat(),
-            "user":    f"{member} ({member.id})",
-            "uid":     str(member.id),
-            "word":    triggered_word,
-            "strikes": strikes,
-            "action":  action_text,
-            "channel": str(message.channel),
-        })
-        self._automod_log = self._automod_log[-100:]
-        self._save_data()
+        elif cmd == "giveaway":
+            if not is_mod():
+                return await send_embed("❌ Permission Denied", "You need moderator permissions.", 0xe63946)
+            try:
+                full = " ".join(args)
+                parts = full.split("|")
+                prize = parts[0].strip()
+                duration_min = int(parts[1].strip())
+                winners = int(parts[2].strip())
+            except Exception:
+                return await send_embed("Usage", f"{self._prefix}giveaway Prize | DurationMinutes | Winners")
+            if duration_min < 1:
+                return await send_embed("❌ Error", "Duration must be at least 1 minute.")
+            end_time = time.time() + duration_min * 60
+            em = discord.Embed(title="🎉 Giveaway!", description=f"**Prize:** {prize}\nReact with 🎉 to enter!\nEnds: <t:{int(end_time)}:R>", colour=0xf72585)
+            msg = await channel.send(embed=em)
+            await msg.add_reaction("🎉")
+            self._giveaways[msg.id] = {
+                "prize": prize,
+                "end_time": end_time,
+                "winners": winners,
+                "channel_id": channel.id,
+            }
+            self._save_data()
+
+        elif cmd == "tempvc":
+            if not is_admin():
+                return await send_embed("❌ Permission Denied", "You need admin permissions.", 0xe63946)
+            if len(args) < 2:
+                return await send_embed("Usage", f"{self._prefix}tempvc create <name> <duration_minutes>")
+            action = args[0].lower()
+            if action != "create":
+                return await send_embed("Usage", f"{self._prefix}tempvc create <name> <duration_minutes>")
+            try:
+                name = " ".join(args[1:-1])
+                minutes = int(args[-1])
+            except ValueError:
+                return await send_embed("❌ Error", "Duration must be a number.")
+            if minutes < 1:
+                return await send_embed("❌ Error", "Duration must be at least 1 minute.")
+            try:
+                vc = await guild.create_voice_channel(name)
+                self._temp_vcs[vc.id] = {
+                    "expires": time.time() + minutes * 60,
+                    "creator_id": author.id,
+                }
+                self._save_data()
+                await send_embed("🎤 Temporary VC Created", f"{vc.mention} will be deleted in {minutes} min.")
+            except discord.Forbidden:
+                await send_embed("❌ Error", "I can't create voice channels.")
+
+        elif cmd == "help":
+            em = discord.Embed(title="Bot Help", description=f"Prefix: `{self._prefix}`\nUse slash commands for more features.", colour=0x4cc9f0)
+            em.add_field(name="Moderation", value="kick, ban, unban, timeout, warn, warnings, clearwarnings, bannedlist, purge", inline=False)
+            em.add_field(name="Server Management", value="setwelcome, verify, suggest, reactionrole, ticket, giveaway, tempvc", inline=False)
+            em.add_field(name="Other", value="announce, poll, setprefix, stats", inline=False)
+            await channel.send(embed=em)
+
+        elif cmd == "setprefix":
+            if not is_admin():
+                return await send_embed("❌ Permission Denied", "You need admin permissions.", 0xe63946)
+            if len(args) < 1:
+                return await send_embed("Usage", f"{self._prefix}setprefix <new_prefix>")
+            new_prefix = args[0]
+            if len(new_prefix) > 5:
+                return await send_embed("❌ Error", "Prefix must be 5 characters or fewer.")
+            self._prefix = new_prefix
+            self._save_data()
+            await send_embed("✅ Prefix Changed", f"Prefix set to `{self._prefix}`")
+
+        elif cmd == "stats":
+            em = discord.Embed(title="Bot Stats", colour=0x4cc9f0)
+            em.add_field(name="Commands Used", value=str(self._command_uses))
+            em.add_field(name="Prefix", value=self._prefix)
+            await channel.send(embed=em)
 
     # -----------------------------------------------------------------------
-    # Main polling
+    # Helper methods for prefix commands
     # -----------------------------------------------------------------------
-    @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
-    async def poll_updates(self) -> None:
-        self._last_check_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        if time.time() < self._muted_until:
-            return
-        channel = self.get_channel(self.update_channel_id)
-        if not isinstance(channel, discord.abc.Messageable):
-            return
+    async def _get_member_from_mention(self, guild: discord.Guild, mention: str) -> discord.Member | None:
+        if mention.startswith("<@") and mention.endswith(">"):
+            try:
+                member_id = int(mention.strip("<@!>"))
+                return guild.get_member(member_id) or await guild.fetch_member(member_id)
+            except Exception:
+                pass
+        return None
 
-        ping_content = ""
-        if PING_EVERYONE:
-            guild = channel.guild if isinstance(channel, discord.TextChannel) else None
-            if guild and self._ping_role_id:
-                role = guild.get_role(self._ping_role_id)
-                ping_content = f"{role.mention}\n" if role else "@everyone\n"
-            else:
-                ping_content = "@everyone\n"
+    async def _get_role_from_mention(self, guild: discord.Guild, mention: str) -> discord.Role | None:
+        if mention.startswith("<@&") and mention.endswith(">"):
+            try:
+                role_id = int(mention.strip("<@&>"))
+                return guild.get_role(role_id)
+            except Exception:
+                pass
+        return None
 
-        now = datetime.now(timezone.utc)
-        ts = now.strftime("%B %d, %Y %I:%M %p")
-        date_str = now.strftime("%m/%d/%Y %I:%M %p")
+    async def _get_channel_from_mention(self, guild: discord.Guild, mention: str) -> discord.TextChannel | None:
+        if mention.startswith("<#") and mention.endswith(">"):
+            try:
+                channel_id = int(mention.strip("<#>"))
+                ch = guild.get_channel(channel_id)
+                if isinstance(ch, discord.TextChannel):
+                    return ch
+            except Exception:
+                pass
+        return None
 
-        if self._filters.get("client"):
-            cv = await self.get_client_version()
-            if cv and cv != self._last_client_version:
-                if self._last_client_version is not None:
-                    self._client_changelog.append({"version": cv, "time": self._last_check_time})
-                    self._client_changelog = self._client_changelog[-10:]
-                    em = discord.Embed(
-                        title="🚨 Roblox Update Detected!",
-                        description="This is a live update, Roblox is **patched**.",
-                        colour=0xe63946,
-                        timestamp=now,
-                    )
-                    em.add_field(name="Platform",     value="Windows",   inline=False)
-                    em.add_field(name="Version Hash", value=f"`{cv}`",   inline=False)
-                    em.add_field(name="Date",         value=ts,          inline=False)
-                    em.set_footer(text=date_str)
-                    await channel.send(content=ping_content, embed=em)
-                self._last_client_version = cv
+    # -----------------------------------------------------------------------
+    # Reaction handling for reaction roles
+    # -----------------------------------------------------------------------
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        if str(payload.message_id) in self._reaction_roles:
+            guild = self.get_guild(payload.guild_id) if payload.guild_id else None
+            if not guild:
+                return
+            member = payload.member
+            if not member or member.bot:
+                return
+            emoji = str(payload.emoji)
+            roles = self._reaction_roles[str(payload.message_id)]
+            if emoji in roles:
+                role = guild.get_role(roles[emoji])
+                if role:
+                    try:
+                        await member.add_roles(role)
+                    except discord.Forbidden:
+                        pass
 
-        if self._filters.get("devforum"):
-            posts = await self.get_devforum_posts(DEVFORUM_ANNOUNCEMENTS_URL, limit=1)
-            if posts:
-                latest = posts[0]
-                if latest["id"] != self._last_devforum_id:
-                    if self._last_devforum_id is not None:
-                        em = discord.Embed(title="📢 New DevForum Announcement",
-                                           description=f"[{latest['title']}]({latest['url']})",
-                                           colour=0xffd166, timestamp=now)
-                        em.set_footer(text="Roblox DevForum")
-                        await channel.send(content=ping_content, embed=em)
-                    self._last_devforum_id = latest["id"]
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        if str(payload.message_id) in self._reaction_roles:
+            guild = self.get_guild(payload.guild_id) if payload.guild_id else None
+            if not guild:
+                return
+            member = guild.get_member(payload.user_id)
+            if not member or member.bot:
+                return
+            emoji = str(payload.emoji)
+            roles = self._reaction_roles[str(payload.message_id)]
+            if emoji in roles:
+                role = guild.get_role(roles[emoji])
+                if role:
+                    try:
+                        await member.remove_roles(role)
+                    except discord.Forbidden:
+                        pass
 
-        if self._filters.get("incident"):
-            incidents = await self.get_unresolved_incidents()
-            if incidents:
-                latest_inc = incidents[0]
-                if latest_inc["id"] != self._last_incident_id:
-                    if self._last_incident_id is not None:
-                        colors = {"none":0x06d6a0,"minor":0xffd166,"major":0xff6b35,"critical":0xe63946}
-                        em = discord.Embed(title=f"🚨 Roblox Incident: {latest_inc['name']}",
-                                           description=latest_inc["latest_update"],
-                                           colour=colors.get(latest_inc["impact"],0xaaa), timestamp=now)
-                        em.add_field(name="Status", value=latest_inc["status"].replace("_"," ").title(), inline=True)
-                        em.add_field(name="Impact", value=latest_inc["impact"].title(), inline=True)
-                        em.add_field(name="Details", value=f"[View]({latest_inc['url']})", inline=False)
-                        em.set_footer(text="status.roblox.com")
-                        await channel.send(content=ping_content, embed=em)
-                    self._last_incident_id = latest_inc["id"]
+    # -----------------------------------------------------------------------
+    # Background tasks for giveaways & temp VCs
+    # -----------------------------------------------------------------------
+    @tasks.loop(seconds=15)
+    async def check_giveaways(self) -> None:
+        now = time.time()
+        expired = []
+        for msg_id, gdata in list(self._giveaways.items()):
+            if now >= gdata["end_time"]:
+                expired.append(msg_id)
+                channel = self.get_channel(gdata["channel_id"])
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+                try:
+                    message = await channel.fetch_message(msg_id)
+                except discord.NotFound:
+                    continue
+                reaction = discord.utils.get(message.reactions, emoji="🎉")
+                users = []
+                if reaction:
+                    async for user in reaction.users():
+                        if not user.bot:
+                            users.append(user)
+                winners_needed = min(gdata["winners"], len(users))
+                winners = random.sample(users, winners_needed) if winners_needed > 0 else []
+                winner_mentions = ", ".join(w.mention for w in winners) if winners else "No one"
+                em = discord.Embed(title="🎉 Giveaway Ended!", description=f"**Prize:** {gdata['prize']}\n**Winners:** {winner_mentions}", colour=0x06d6a0)
+                await channel.send(embed=em)
+                del self._giveaways[msg_id]
+        if expired:
+            self._save_data()
 
-    @poll_updates.before_loop
-    async def before_poll(self) -> None:
+    @tasks.loop(seconds=30)
+    async def check_tempvcs(self) -> None:
+        now = time.time()
+        to_delete = [cid for cid, vcdata in self._temp_vcs.items() if now >= vcdata["expires"]]
+        for cid in to_delete:
+            vc = self.get_channel(cid)
+            if vc and isinstance(vc, discord.VoiceChannel):
+                try:
+                    await vc.delete()
+                except discord.Forbidden:
+                    pass
+            del self._temp_vcs[cid]
+        if to_delete:
+            self._save_data()
+
+    @check_giveaways.before_loop
+    async def before_giveaways(self):
         await self.wait_until_ready()
 
+    @check_tempvcs.before_loop
+    async def before_tempvcs(self):
+        await self.wait_until_ready()
+
+    # -----------------------------------------------------------------------
+    # Setup hook
+    # -----------------------------------------------------------------------
+    async def setup_hook(self) -> None:
+        self.poll_updates.start()
+        self.rotate_presence.start()
+        self.poll_ugc_prices.start()
+        self.check_scheduled.start()
+        self.check_giveaways.start()
+        self.check_tempvcs.start()
+
+    # -----------------------------------------------------------------------
+    # on_ready
+    # -----------------------------------------------------------------------
+    async def on_ready(self) -> None:
+        if not self.user:
+            return
+        self._start_time = time.time()
+        log.info("Logged in as %s (%s)", self.user, self.user.id)
+        for guild in self.guilds:
+            try:
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+                log.info("Synced commands to guild %s (%s)", guild.name, guild.id)
+            except Exception as e:
+                log.warning("Failed to sync to guild %s: %s", guild.id, e)
+        channel = self.get_channel(self.update_channel_id)
+        if isinstance(channel, discord.abc.Messageable):
+            cv = await self.get_client_version()
+            em = discord.Embed(
+                title="🚀 Roblox Update Tracker — Online",
+                description="Bot is online and monitoring for updates!",
+                colour=0x4cc9f0,
+                timestamp=datetime.now(timezone.utc),
+            )
+            em.add_field(name="🎮 Client", value=f"`{cv or 'N/A'}`", inline=True)
+            em.set_footer(text=f"Polling every {CHECK_INTERVAL_MINUTES} min")
+            await channel.send(embed=em)
+
+
+# ============================================================================
+# ALL SLASH COMMANDS
+# ============================================================================
 
 # ---------------------------------------------------------------------------
 # Bot instance
@@ -774,8 +1324,7 @@ async def cmd_roblox_version(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
     v = await bot.get_client_version()
     now = datetime.now(timezone.utc)
-    em = discord.Embed(title="🚨 Roblox Update Info", description="Current live version from Roblox CDN.",
-                       colour=0xe63946, timestamp=now)
+    em = discord.Embed(title="🚨 Roblox Update Info", description="Current live version from Roblox CDN.", colour=0xe63946, timestamp=now)
     em.add_field(name="Platform",     value="Windows",           inline=False)
     em.add_field(name="Version Hash", value=f"`{v or 'N/A'}`",  inline=False)
     em.add_field(name="Date",         value=now.strftime("%B %d, %Y %I:%M %p"), inline=False)
@@ -905,7 +1454,7 @@ async def cmd_changelog(interaction: discord.Interaction) -> None:
 @app_commands.describe(version1="First version string", version2="Second version string")
 async def cmd_compare_versions(interaction: discord.Interaction, version1: str, version2: str) -> None:
     bot._command_uses += 1
-    def parse(v: str) -> list[int]:
+    def parse(v: str):
         return [int(x) for x in v.replace("version-","").split(".") if x.isdigit()]
     try:
         v1, v2 = parse(version1), parse(version2)
@@ -957,13 +1506,13 @@ async def cmd_game_status(interaction: discord.Interaction, place_id: str) -> No
 async def cmd_random_game(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
     await interaction.response.defer()
-    import random
+    import random as rand
     d = await bot._json(ROBLOX_GAMES_LIST_URL)
     if not d or not d.get("games"):
         await interaction.followup.send("❌ Could not fetch games list.")
         return
     games = d["games"]
-    game = random.choice(games)
+    game = rand.choice(games)
     em = discord.Embed(title=f"🎲 Random Game: {game.get('name','?')}",
                        url=f"https://www.roblox.com/games/{game.get('placeId',0)}",
                        colour=0x9b5de5, timestamp=datetime.now(timezone.utc))
@@ -1379,9 +1928,9 @@ async def cmd_help(interaction: discord.Interaction) -> None:
             ("/warnings",          "See all warnings for a user"),
             ("/clearwarnings",     "Clear a user's warnings"),
             ("/kick",              "Kick a user (optionally anonymous)"),
-            ("/ban",               "Ban a user (optionally anonymous, saved to 7‑day list)"),
-            ("/unban",             "Unban a user by ID (optionally anonymous)"),
-            ("/banned_list",       "Show recently banned users (last 7 days)"),
+            ("/ban",               "Ban a user (optionally anonymous)"),
+            ("/unban",             "Unban a user by ID"),
+            ("/banned_list",       "Show recently banned users"),
             ("/timeout",           "Timeout a user for X minutes"),
         ],
         "📢 Announcements": [
@@ -1433,6 +1982,18 @@ async def cmd_help(interaction: discord.Interaction) -> None:
             ("/set_mod_role",   "Set role that can use mod commands (Admin)"),
             ("/set_admin_role", "Set role that can use admin commands (Admin)"),
             ("/sync",           "Force re-sync all commands to this server (Admin)"),
+        ],
+        "✨ Server Management": [
+            ("/setwelcome",        "Set welcome channel & message (Admin)"),
+            ("/verify",            "Send a verification panel"),
+            ("/setverifiedrole",   "Set the role given by verification (Admin)"),
+            ("/suggest",           "Submit a suggestion"),
+            ("/setsuggestchannel", "Set suggestion channel (Admin)"),
+            ("/reactionrole",      "Add/remove reaction roles (Admin)"),
+            ("/ticket",            "Create a ticket channel"),
+            ("/close",             "Close a ticket channel"),
+            ("/giveaway",          "Start a giveaway (Mod)"),
+            ("/tempvc",            "Create a temporary voice channel (Admin)"),
         ],
     }
     for category, cmds in categories.items():
@@ -1572,7 +2133,6 @@ async def cmd_ban(interaction: discord.Interaction, member: discord.Member,
         await interaction.response.send_message("❌ I don't have permission to ban that member.", ephemeral=True)
         return
 
-    # Add to the 7‑day banned list
     bot._banned_users[str(member.id)] = {
         "user": str(member),
         "reason": reason,
@@ -1596,68 +2156,27 @@ async def cmd_ban(interaction: discord.Interaction, member: discord.Member,
     await bot._log_action(em)
 
 
-@bot.tree.command(name="unban", description="Unban a user by ID (from the 7‑day list)")
-@app_commands.describe(user_id="The Discord ID of the banned user",
-                       anonymous="Hide your identity in the audit log (default: False)")
+@bot.tree.command(name="unban", description="Unban a user by ID")
+@app_commands.describe(user_id="The Discord ID of the banned user")
 @mod_check()
-async def cmd_unban(interaction: discord.Interaction, user_id: str,
-                    anonymous: bool = False) -> None:
+async def cmd_unban(interaction: discord.Interaction, user_id: str) -> None:
     bot._command_uses += 1
     guild = interaction.guild
     if not guild:
         await interaction.response.send_message("❌ Must be used in a server.", ephemeral=True)
         return
 
-    if user_id not in bot._banned_users:
-        try:
-            user = await bot.fetch_user(int(user_id))
-            await guild.unban(user, reason=f"Unbanned by {interaction.user}")
-            await interaction.response.send_message(f"✅ Unbanned `{user}` (not in the 7‑day list).", ephemeral=True)
-            bot._add_audit("unban", interaction.user, f"Unbanned {user} ({user.id}) (not in list)")
-            return
-        except discord.NotFound:
-            await interaction.response.send_message("❌ User not found in ban list or Discord.", ephemeral=True)
-            return
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to unban.", ephemeral=True)
-            return
-
-    ban_data = bot._banned_users[user_id]
     try:
         user = await bot.fetch_user(int(user_id))
         await guild.unban(user, reason=f"Unbanned by {interaction.user}")
+        if user_id in bot._banned_users:
+            del bot._banned_users[user_id]
+            bot._save_data()
+        await interaction.response.send_message(f"✅ Unbanned {user}.")
     except discord.NotFound:
-        pass
+        await interaction.response.send_message("❌ User not found.", ephemeral=True)
     except discord.Forbidden:
         await interaction.response.send_message("❌ I don't have permission to unban.", ephemeral=True)
-        return
-
-    del bot._banned_users[user_id]
-    bot._save_data()
-
-    dm_sent = False
-    try:
-        if anonymous:
-            dm_content = f"You have been **unbanned** from **{guild.name}**."
-        else:
-            dm_content = f"You have been **unbanned** from **{guild.name}** by {interaction.user.mention}."
-        await user.send(dm_content)
-        dm_sent = True
-    except Exception:
-        pass
-
-    em = discord.Embed(title="🔓 Member Unbanned", colour=0x06d6a0,
-                       timestamp=datetime.now(timezone.utc))
-    em.add_field(name="User",  value=f"{user} ({user.id})", inline=False)
-    em.add_field(name="Unbanned by", value="Anonymous" if anonymous else str(interaction.user), inline=True)
-    if dm_sent:
-        em.set_footer(text="User was notified via DM.")
-    else:
-        em.set_footer(text="Could not DM the user.")
-    await interaction.response.send_message(embed=em)
-
-    bot._add_audit("unban", interaction.user, f"Unbanned {user} ({user.id})")
-    await bot._log_action(em)
 
 
 @bot.tree.command(name="banned_list", description="Show users banned in the last 7 days")
@@ -1673,18 +2192,15 @@ async def cmd_banned_list(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(embed=em)
         return
 
-    entries = list(bot._banned_users.values())
-    entries.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-
+    entries = sorted(bot._banned_users.values(), key=lambda x: x["timestamp"], reverse=True)
     for entry in entries[:20]:
-        timestamp = entry.get("timestamp", 0)
-        time_str = f"<t:{int(timestamp)}:R>" if timestamp else "Unknown"
+        ts = int(entry["timestamp"])
         em.add_field(
             name=f"{entry.get('user', 'Unknown')}",
             value=(
                 f"**Reason:** {entry.get('reason', 'N/A')}\n"
                 f"**Banned by:** {entry.get('banned_by', 'Unknown')}\n"
-                f"**When:** {time_str}"
+                f"**When:** <t:{ts}:R>"
             ),
             inline=False,
         )
@@ -1963,6 +2479,14 @@ async def cmd_reset_settings(interaction: discord.Interaction) -> None:
     bot._automod_strikes = {}
     bot._automod_log     = []
     bot._banned_users    = {}
+    bot._welcome_channel_id = None
+    bot._welcome_message = "Welcome {mention} to **{server}**! Enjoy your stay."
+    bot._verified_role_id = None
+    bot._suggestion_channel_id = None
+    bot._reaction_roles = {}
+    bot._giveaways = {}
+    bot._temp_vcs = {}
+    bot._ticket_counter = 0
     bot._save_data()
     em = discord.Embed(title="🔄 Settings Reset", description="All bot settings have been reset to defaults.",
                        colour=0xe63946, timestamp=datetime.now(timezone.utc))
@@ -2617,6 +3141,190 @@ async def cmd_sync(interaction: discord.Interaction) -> None:
     except Exception as e:
         await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
+
+# ---------------------------------------------------------------------------
+# ✨ Server Management Slash Commands
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="setwelcome", description="Set the welcome channel and message (Admin)")
+@app_commands.describe(channel="Welcome channel", message="Welcome message (use {mention}, {server}, {user})")
+@admin_check()
+async def cmd_setwelcome_slash(interaction: discord.Interaction, channel: discord.TextChannel, message: str) -> None:
+    bot._welcome_channel_id = channel.id
+    bot._welcome_message = message
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Welcome channel set to {channel.mention} with message:\n{message}")
+
+@bot.tree.command(name="verify", description="Send a verification panel")
+@mod_check()
+async def cmd_verify_slash(interaction: discord.Interaction) -> None:
+    if not bot._verified_role_id:
+        await interaction.response.send_message("❌ Verified role not set. Admins use `/setverifiedrole`.", ephemeral=True)
+        return
+    role = interaction.guild.get_role(bot._verified_role_id)
+    if not role:
+        await interaction.response.send_message("❌ Verified role not found.", ephemeral=True)
+        return
+    view = discord.ui.View()
+    btn = discord.ui.Button(label="Verify", style=discord.ButtonStyle.green)
+    async def callback(inter: discord.Interaction):
+        if role in inter.user.roles:
+            await inter.response.send_message("You are already verified.", ephemeral=True)
+            return
+        try:
+            await inter.user.add_roles(role)
+            await inter.response.send_message("✅ You are now verified!", ephemeral=True)
+        except discord.Forbidden:
+            await inter.response.send_message("❌ I can't assign roles.", ephemeral=True)
+    btn.callback = callback
+    view.add_item(btn)
+    em = discord.Embed(title="Verification", description="Click the button below to verify yourself.", colour=0x06d6a0)
+    await interaction.channel.send(embed=em, view=view)
+    await interaction.response.send_message("Verification panel sent.", ephemeral=True)
+
+@bot.tree.command(name="setverifiedrole", description="Set the role assigned on verification (Admin)")
+@app_commands.describe(role="Role to assign")
+@admin_check()
+async def cmd_setverifiedrole_slash(interaction: discord.Interaction, role: discord.Role) -> None:
+    bot._verified_role_id = role.id
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Verified role set to {role.mention}.")
+
+@bot.tree.command(name="suggest", description="Submit a suggestion")
+@app_commands.describe(suggestion="Your suggestion")
+async def cmd_suggest_slash(interaction: discord.Interaction, suggestion: str) -> None:
+    if not bot._suggestion_channel_id:
+        await interaction.response.send_message("❌ Suggestion channel not configured.", ephemeral=True)
+        return
+    ch = interaction.guild.get_channel(bot._suggestion_channel_id)
+    if not isinstance(ch, discord.TextChannel):
+        await interaction.response.send_message("❌ Suggestion channel not found.", ephemeral=True)
+        return
+    em = discord.Embed(description=suggestion, colour=0x9b5de5, timestamp=datetime.now(timezone.utc))
+    em.set_author(name=f"Suggestion by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    msg = await ch.send(embed=em)
+    await msg.add_reaction("👍")
+    await msg.add_reaction("👎")
+    await interaction.response.send_message("✅ Suggestion posted!", ephemeral=True)
+
+@bot.tree.command(name="setsuggestchannel", description="Set the channel for suggestions (Admin)")
+@app_commands.describe(channel="Channel for suggestions")
+@admin_check()
+async def cmd_setsuggestchannel_slash(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    bot._suggestion_channel_id = channel.id
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Suggestion channel set to {channel.mention}.")
+
+@bot.tree.command(name="reactionrole", description="Add/Remove a reaction role (Admin)")
+@app_commands.describe(action="add or remove", channel="Channel of the message", message_id="Message ID",
+                        emoji="Emoji", role="Role (for add)")
+@admin_check()
+async def cmd_reactionrole_slash(interaction: discord.Interaction, action: str,
+                                  channel: discord.TextChannel, message_id: str,
+                                  emoji: str, role: discord.Role | None = None) -> None:
+    try:
+        msg_id = int(message_id)
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+        return
+    if action.lower() == "add":
+        if not role:
+            await interaction.response.send_message("❌ Role is required for add.", ephemeral=True)
+            return
+        msg = await channel.fetch_message(msg_id)
+        try:
+            await msg.add_reaction(emoji)
+        except Exception:
+            await interaction.response.send_message("❌ Cannot add that emoji.", ephemeral=True)
+            return
+        bot._reaction_roles.setdefault(str(msg_id), {})[emoji] = role.id
+        bot._save_data()
+        await interaction.response.send_message(f"✅ Reaction role added: {emoji} → {role.mention}")
+    elif action.lower() == "remove":
+        if str(msg_id) in bot._reaction_roles and emoji in bot._reaction_roles[str(msg_id)]:
+            del bot._reaction_roles[str(msg_id)][emoji]
+            if not bot._reaction_roles[str(msg_id)]:
+                del bot._reaction_roles[str(msg_id)]
+            bot._save_data()
+            await interaction.response.send_message(f"✅ Reaction role removed for {emoji}.")
+        else:
+            await interaction.response.send_message("❌ Not found.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Action must be 'add' or 'remove'.", ephemeral=True)
+
+@bot.tree.command(name="ticket", description="Create a ticket channel")
+@app_commands.describe(reason="Reason for ticket")
+async def cmd_ticket_slash(interaction: discord.Interaction, reason: str = "No reason") -> None:
+    guild = interaction.guild
+    bot._ticket_counter += 1
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+    if bot._mod_role_id:
+        mr = guild.get_role(bot._mod_role_id)
+        if mr: overwrites[mr] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    if bot._admin_role_id:
+        ar = guild.get_role(bot._admin_role_id)
+        if ar: overwrites[ar] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    category = discord.utils.get(guild.categories, name="Tickets")
+    if not category:
+        try:
+            category = await guild.create_category("Tickets")
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ Cannot create category.", ephemeral=True)
+            return
+    try:
+        ch = await guild.create_text_channel(name=f"ticket-{bot._ticket_counter}", category=category, overwrites=overwrites)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Cannot create channel.", ephemeral=True)
+        return
+    em = discord.Embed(title="📩 Ticket Created", description=f"Hello {interaction.user.mention}, your ticket is ready.\nReason: {reason}\nUse `/close` to close.", colour=0x4cc9f0)
+    await ch.send(embed=em)
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Ticket created: {ch.mention}", ephemeral=True)
+
+@bot.tree.command(name="close", description="Close this ticket channel")
+async def cmd_close_slash(interaction: discord.Interaction) -> None:
+    ch = interaction.channel
+    if not isinstance(ch, discord.TextChannel) or not ch.name.startswith("ticket-"):
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
+        return
+    try:
+        await ch.delete(reason="Ticket closed.")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Cannot delete channel.", ephemeral=True)
+
+@bot.tree.command(name="giveaway", description="Start a giveaway (Mod)")
+@app_commands.describe(prize="Prize", duration_minutes="Duration in minutes", winners="Number of winners")
+@mod_check()
+async def cmd_giveaway_slash(interaction: discord.Interaction, prize: str, duration_minutes: int, winners: int) -> None:
+    if duration_minutes < 1:
+        await interaction.response.send_message("❌ Duration must be at least 1 minute.", ephemeral=True)
+        return
+    end_time = time.time() + duration_minutes * 60
+    em = discord.Embed(title="🎉 Giveaway!", description=f"**Prize:** {prize}\nReact with 🎉 to enter!\nEnds: <t:{int(end_time)}:R>", colour=0xf72585)
+    await interaction.response.send_message(embed=em)
+    msg = await interaction.original_response()
+    await msg.add_reaction("🎉")
+    bot._giveaways[msg.id] = {"prize": prize, "end_time": end_time, "winners": winners, "channel_id": interaction.channel_id}
+    bot._save_data()
+
+@bot.tree.command(name="tempvc", description="Create a temporary voice channel (Admin)")
+@app_commands.describe(name="Channel name", duration_minutes="Minutes until deletion")
+@admin_check()
+async def cmd_tempvc_slash(interaction: discord.Interaction, name: str, duration_minutes: int) -> None:
+    if duration_minutes < 1:
+        await interaction.response.send_message("❌ Duration must be at least 1 minute.", ephemeral=True)
+        return
+    try:
+        vc = await interaction.guild.create_voice_channel(name)
+        bot._temp_vcs[vc.id] = {"expires": time.time() + duration_minutes * 60, "creator_id": interaction.user.id}
+        bot._save_data()
+        await interaction.response.send_message(f"🎤 Temporary VC {vc.mention} created. Deletes in {duration_minutes} min.")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Cannot create voice channel.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # Entry point
