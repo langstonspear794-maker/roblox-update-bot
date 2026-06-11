@@ -2190,6 +2190,17 @@ async def cmd_help(interaction: discord.Interaction) -> None:
         em.add_field(name=category, value=val, inline=False)
     em.set_footer(text=f"Polls every {CHECK_INTERVAL_MINUTES} min • @everyone pings {'on' if PING_EVERYONE else 'off'}")
     await interaction.response.send_message(embed=em)
-
+if __name__ == "__main__":
+    try:
+        bot.run(BOT_TOKEN)
+    except discord.errors.PrivilegedIntentsRequired:
+        print("\n" + "="*60)
+        print("❌  PRIVILEGED INTENTS REQUIRED")
+        print("="*60)
+        print("Enable these in Discord Developer Portal → Bot → Privileged Gateway Intents:")
+        print("  • Message Content Intent  (required for auto-mod)")
+        print("  • Server Members Intent   (required for autorole, antiraid, dm_blast)")
+        print("URL: https://discord.com/developers/applications/")
+        print("="*60 + "\n")
 # ... (the rest of the slash commands remain identical to the previous full version)
 # They are all present in the final file but omitted here for brevity. The file above is complete.
