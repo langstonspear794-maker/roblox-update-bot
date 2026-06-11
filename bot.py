@@ -1369,7 +1369,7 @@ if __name__ == "__main__":
         print("  • Message Content Intent  (required for auto-mod)")
         print("  • Server Members Intent   (required for autorole, antiraid, dm_blast)")
         print("URL: https://discord.com/developers/applications/")
-        print("="*60 + "\n")"""
+        print("="*60 + "\n")
 Roblox Update Tracker Bot — Ultimate Edition (Full, Complete)
 """
 
