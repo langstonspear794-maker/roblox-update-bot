@@ -1,6 +1,8 @@
 """
 Roblox Update Tracker Bot — Ultimate Edition
 (type‑safe, prefix + slash commands, full server management)
+Now with chatbot (no API key) and DM ticket creation.
+All background loops present – poll_updates, rotate_presence, etc.
 """
 
 import asyncio
@@ -82,6 +84,65 @@ PRESENCE_ACTIVITIES = [
     ("DevForum announcements",   discord.ActivityType.watching),
     ("for security patches",     discord.ActivityType.watching),
     ("the UGC market",           discord.ActivityType.watching),
+]
+
+# ---------------------------------------------------------------------------
+# Simple chatbot responses (no API key needed)
+# ---------------------------------------------------------------------------
+CHAT_RESPONSES = {
+    "hello": [
+        "Hello! 👋 How can I help you today?",
+        "Hi there! What's up?",
+        "Hey! Need something?"
+    ],
+    "hi": [
+        "Hey! How can I assist you?",
+        "Hi! What do you need?",
+        "Hello! I'm here to help."
+    ],
+    "how are you": [
+        "I'm just a bunch of code, but I'm doing great! 😄",
+        "Feeling electric! ⚡",
+        "All systems operational!"
+    ],
+    "help": [
+        "Sure! I can track Roblox updates, moderate the server, and more. Try `!help` to see all commands.",
+        "Need assistance? I can help with moderation, Roblox info, and server management. Just ask!",
+        "I'm here to help! What do you need?"
+    ],
+    "roblox": [
+        "I love Roblox! I can check game status, player info, and more. Use `/game_status` or `/player_lookup`.",
+        "Roblox is my specialty! Try `/ugc_trending` or `/latest_updates`.",
+        "I track Roblox updates live! Want to see the latest version? Use `/roblox_version`."
+    ],
+    "thanks": [
+        "You're welcome! 😊",
+        "No problem! Happy to help.",
+        "Anytime!"
+    ],
+    "bye": [
+        "Goodbye! 👋",
+        "See you later!",
+        "Bye! Come back soon."
+    ],
+    "joke": [
+        "Why do Roblox developers never sleep? They just `wait()` for the next update! 😆",
+        "Why did the Lua script go to therapy? Too many nil references!",
+        "What's a developer's favorite drink? Java! ... oh wait, wrong platform."
+    ],
+    "ticket": [
+        "To create a ticket, just type `!ticket` followed by your reason (e.g., `!ticket I need help with my account`).",
+        "Need support? Use `!ticket <reason>` and a staff member will assist you!",
+        "I can open a ticket for you! Just say `!ticket` with your issue."
+    ],
+}
+
+FALLBACK_RESPONSES = [
+    "I'm not sure I understand. Try `!help` to see what I can do.",
+    "That's interesting! But I'm a Roblox tracker bot, maybe ask something Roblox related?",
+    "I'm just a bot, but I'm here to help with Roblox stuff and server management.",
+    "Sorry, I didn't catch that. Can you rephrase?",
+    "🤖 Beep boop! That's not in my database, but I'm always learning (sort of)."
 ]
 
 # ---------------------------------------------------------------------------
@@ -246,6 +307,25 @@ class RobloxBot(discord.Client):
             del self._banned_users[uid]
         if expired:
             self._save_data()
+
+    def _add_audit(self, action: str, user: discord.User | discord.Member, detail: str = "") -> None:
+        self._audit_log.append({
+            "time":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "action": action,
+            "by":     f"{user} ({user.id})",
+            "detail": detail,
+        })
+        self._audit_log = self._audit_log[-200:]
+        self._save_data()
+
+    async def _log_action(self, embed: discord.Embed) -> None:
+        if self._log_channel_id:
+            ch = self.get_channel(self._log_channel_id)
+            if isinstance(ch, discord.abc.Messageable):
+                try:
+                    await ch.send(embed=embed)
+                except Exception:
+                    pass
 
     # -----------------------------------------------------------------------
     # HTTP helpers
@@ -539,83 +619,142 @@ class RobloxBot(discord.Client):
                     pass
 
     # -----------------------------------------------------------------------
-    # Auto-mod + prefix handler
+    # Auto-mod + prefix handler + chatbot + DM ticket
     # -----------------------------------------------------------------------
     async def on_message(self, message: discord.Message) -> None:
-        # Auto-mod check
-        if message.author.bot or not self._automod_enabled:
-            pass  # skip automod if not enabled, but still handle commands
-        else:
-            guild = message.guild
-            if guild and isinstance(message.author, discord.Member):
-                content = message.content
-                if content:
-                    normalized = _normalize(content)
-                    triggered_word = next((w for w in self._automod_words if w in normalized), None)
-                    if triggered_word:
-                        try:
-                            await message.delete()
-                        except Exception:
-                            pass
-                        uid = str(message.author.id)
-                        self._automod_strikes[uid] = self._automod_strikes.get(uid, 0) + 1
-                        strikes = self._automod_strikes[uid]
-                        import datetime as dt
-                        member = message.author
-                        try:
-                            if strikes >= 3:
-                                if self._automod_penalty == "kick":
-                                    await member.kick(reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
-                                    action_text = "**Kicked** from the server"
-                                    self._automod_strikes[uid] = 0
-                                else:
-                                    until = discord.utils.utcnow() + dt.timedelta(days=7)
-                                    await member.timeout(until, reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
-                                    action_text = "**Timed out for 7 days**"
-                                color = 0xe63946
-                            else:
-                                until = discord.utils.utcnow() + dt.timedelta(minutes=10)
-                                await member.timeout(until, reason=f"Auto-mod: profanity (strike {strikes}/3)")
-                                action_text = "**Timed out for 10 minutes**"
-                                color = 0xffd166
-                        except discord.Forbidden:
-                            action_text = "⚠️ Could not punish (missing permissions)"
-                            color = 0xaaaaaa
-                        warn_em = discord.Embed(
-                            title="🤬 Language Warning",
-                            description=(
-                                f"{member.mention} your message was removed for inappropriate language.\n"
-                                f"Strike **{strikes}/3** — {action_text}."
-                            ),
-                            colour=color,
-                            timestamp=datetime.now(timezone.utc),
-                        )
-                        warn_em.set_footer(text="3 strikes = kick or 7-day timeout")
-                        try:
-                            await message.channel.send(embed=warn_em, delete_after=15)
-                        except Exception:
-                            pass
-                        log_em = discord.Embed(title="🤬 Auto-mod: Profanity Detected", colour=color,
-                                               timestamp=datetime.now(timezone.utc))
-                        log_em.add_field(name="Member",  value=f"{member} ({member.id})", inline=True)
-                        log_em.add_field(name="Strikes", value=f"{strikes}/3",            inline=True)
-                        log_em.add_field(name="Action",  value=action_text,               inline=True)
-                        log_em.add_field(name="Channel", value=message.channel.mention,   inline=True)
-                        await self._log_action(log_em)
-                        self._automod_log.append({
-                            "ts":      datetime.now(timezone.utc).isoformat(),
-                            "user":    f"{member} ({member.id})",
-                            "uid":     str(member.id),
-                            "word":    triggered_word,
-                            "strikes": strikes,
-                            "action":  action_text,
-                            "channel": str(message.channel),
-                        })
-                        self._automod_log = self._automod_log[-100:]
-                        self._save_data()
-                        return  # don't process as command
+        # Ignore our own messages
+        if message.author == self.user:
+            return
 
-        # Prefix command handling (if not bot and in guild)
+        # ---- DM handling ----
+        if message.guild is None:
+            # Check for ticket creation in DM
+            content = message.content.strip().lower()
+            if content == "!ticket" or content == "/ticket" or content.startswith("!ticket ") or content.startswith("/ticket "):
+                reason = "No reason provided"
+                if content.startswith("!ticket "):
+                    reason = message.content[len("!ticket "):].strip()
+                elif content.startswith("/ticket "):
+                    reason = message.content[len("/ticket "):].strip()
+                user = message.author
+                mutual_guilds = [g for g in self.guilds if g.get_member(user.id)]
+                if not mutual_guilds:
+                    await message.channel.send("❌ You don't share any server with me. Please join a server where I'm present.")
+                    return
+                guild = mutual_guilds[0]
+                self._ticket_counter += 1
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                    guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                }
+                if self._mod_role_id:
+                    mod_role = guild.get_role(self._mod_role_id)
+                    if mod_role: overwrites[mod_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                if self._admin_role_id:
+                    admin_role = guild.get_role(self._admin_role_id)
+                    if admin_role: overwrites[admin_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                category = discord.utils.get(guild.categories, name="Tickets")
+                if not category:
+                    try:
+                        category = await guild.create_category("Tickets")
+                    except discord.Forbidden:
+                        await message.channel.send("❌ I don't have permission to create a ticket in that server.")
+                        return
+                try:
+                    ticket_ch = await guild.create_text_channel(
+                        name=f"ticket-{self._ticket_counter}",
+                        category=category,
+                        overwrites=overwrites
+                    )
+                except discord.Forbidden:
+                    await message.channel.send("❌ I don't have permission to create a ticket channel.")
+                    return
+                em = discord.Embed(title="📩 Ticket Created", description=f"Hello {user.mention}, your ticket has been created.\nReason: {reason}\nStaff will assist you soon.\nUse `/close` to close.", colour=0x4cc9f0)
+                await ticket_ch.send(embed=em)
+                self._save_data()
+                await message.channel.send(f"✅ Ticket created in **{guild.name}**! Your channel: {ticket_ch.mention}")
+                return
+            else:
+                # Chatbot: respond to any DM message
+                response = self._get_chat_response(message.content)
+                await message.channel.send(response)
+                return
+
+        # ---- Guild messages (auto-mod, prefix commands) ----
+        if not message.guild or message.author.bot:
+            return
+
+        # Auto-mod check
+        if self._automod_enabled and isinstance(message.author, discord.Member):
+            content = message.content
+            if content:
+                normalized = _normalize(content)
+                triggered_word = next((w for w in self._automod_words if w in normalized), None)
+                if triggered_word:
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+                    uid = str(message.author.id)
+                    self._automod_strikes[uid] = self._automod_strikes.get(uid, 0) + 1
+                    strikes = self._automod_strikes[uid]
+                    import datetime as dt
+                    member = message.author
+                    try:
+                        if strikes >= 3:
+                            if self._automod_penalty == "kick":
+                                await member.kick(reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
+                                action_text = "**Kicked** from the server"
+                                self._automod_strikes[uid] = 0
+                            else:
+                                until = discord.utils.utcnow() + dt.timedelta(days=7)
+                                await member.timeout(until, reason=f"Auto-mod: repeated profanity ({strikes} strikes)")
+                                action_text = "**Timed out for 7 days**"
+                            color = 0xe63946
+                        else:
+                            until = discord.utils.utcnow() + dt.timedelta(minutes=10)
+                            await member.timeout(until, reason=f"Auto-mod: profanity (strike {strikes}/3)")
+                            action_text = "**Timed out for 10 minutes**"
+                            color = 0xffd166
+                    except discord.Forbidden:
+                        action_text = "⚠️ Could not punish (missing permissions)"
+                        color = 0xaaaaaa
+                    warn_em = discord.Embed(
+                        title="🤬 Language Warning",
+                        description=(
+                            f"{member.mention} your message was removed for inappropriate language.\n"
+                            f"Strike **{strikes}/3** — {action_text}."
+                        ),
+                        colour=color,
+                        timestamp=datetime.now(timezone.utc),
+                    )
+                    warn_em.set_footer(text="3 strikes = kick or 7-day timeout")
+                    try:
+                        await message.channel.send(embed=warn_em, delete_after=15)
+                    except Exception:
+                        pass
+                    log_em = discord.Embed(title="🤬 Auto-mod: Profanity Detected", colour=color,
+                                           timestamp=datetime.now(timezone.utc))
+                    log_em.add_field(name="Member",  value=f"{member} ({member.id})", inline=True)
+                    log_em.add_field(name="Strikes", value=f"{strikes}/3",            inline=True)
+                    log_em.add_field(name="Action",  value=action_text,               inline=True)
+                    log_em.add_field(name="Channel", value=message.channel.mention,   inline=True)
+                    await self._log_action(log_em)
+                    self._automod_log.append({
+                        "ts":      datetime.now(timezone.utc).isoformat(),
+                        "user":    f"{member} ({member.id})",
+                        "uid":     str(member.id),
+                        "word":    triggered_word,
+                        "strikes": strikes,
+                        "action":  action_text,
+                        "channel": str(message.channel),
+                    })
+                    self._automod_log = self._automod_log[-100:]
+                    self._save_data()
+                    return  # don't process as command
+
+        # Prefix command handling
         if message.author.bot or not message.guild:
             return
         content = message.content.strip()
@@ -1087,6 +1226,20 @@ class RobloxBot(discord.Client):
             em.add_field(name="Prefix", value=self._prefix)
             await channel.send(embed=em)
 
+        # ---- Chatbot response ----
+        if message.content.startswith(self._prefix) and cmd not in ("kick", "ban", "unban", "timeout", "warn", "warnings", "clearwarnings", "bannedlist", "purge", "announce", "poll", "setwelcome", "setverifiedrole", "setsuggest", "suggest", "verify", "reactionrole", "ticket", "close", "giveaway", "tempvc", "help", "setprefix", "stats"):
+            # Unknown command -> treat as chat
+            response = self._get_chat_response(" ".join(args))
+            await channel.send(response)
+
+    def _get_chat_response(self, message: str) -> str:
+        """Simple keyword-based chatbot response, no API."""
+        msg = message.lower().strip()
+        for keyword, responses in CHAT_RESPONSES.items():
+            if keyword in msg:
+                return random.choice(responses)
+        return random.choice(FALLBACK_RESPONSES)
+
     # -----------------------------------------------------------------------
     # Helper methods for prefix commands
     # -----------------------------------------------------------------------
@@ -1212,8 +1365,9 @@ class RobloxBot(discord.Client):
     @check_tempvcs.before_loop
     async def before_tempvcs(self):
         await self.wait_until_ready()
+
     # -----------------------------------------------------------------------
-    # Main polling
+    # Main polling loop
     # -----------------------------------------------------------------------
     @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
     async def poll_updates(self) -> None:
@@ -1289,6 +1443,7 @@ class RobloxBot(discord.Client):
     @poll_updates.before_loop
     async def before_poll(self) -> None:
         await self.wait_until_ready()
+
     # -----------------------------------------------------------------------
     # Setup hook
     # -----------------------------------------------------------------------
@@ -1333,11 +1488,7 @@ class RobloxBot(discord.Client):
 # ALL SLASH COMMANDS
 # ============================================================================
 
-# ---------------------------------------------------------------------------
-# Bot instance
-# ---------------------------------------------------------------------------
 bot = RobloxBot()
-
 
 # ---------------------------------------------------------------------------
 # Permission check helpers
@@ -1363,7 +1514,6 @@ def mod_check() -> typing.Callable:
         raise app_commands.MissingPermissions(["manage_messages"])
     return app_commands.check(predicate)
 
-
 def admin_check() -> typing.Callable:
     async def predicate(interaction: discord.Interaction) -> bool:
         if not isinstance(interaction.user, discord.Member) or not interaction.guild:
@@ -1378,7 +1528,6 @@ def admin_check() -> typing.Callable:
         raise app_commands.MissingPermissions(["administrator"])
     return app_commands.check(predicate)
 
-
 @bot.tree.error
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     if isinstance(error, (app_commands.MissingPermissions, app_commands.CheckFailure)):
@@ -1391,10 +1540,7 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
         if not interaction.response.is_done():
             await interaction.response.send_message("❌ An error occurred.", ephemeral=True)
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
-
+# ----- ALL SLASH COMMANDS -----
 @bot.tree.command(name="roblox_version", description="Current live Roblox client version")
 async def cmd_roblox_version(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
@@ -1406,7 +1552,6 @@ async def cmd_roblox_version(interaction: discord.Interaction) -> None:
     em.add_field(name="Date",         value=now.strftime("%B %d, %Y %I:%M %p"), inline=False)
     em.set_footer(text=now.strftime("%m/%d/%Y %I:%M %p"))
     await interaction.followup.send(embed=em)
-
 
 @bot.tree.command(name="latest_updates", description="Latest DevForum announcements")
 async def cmd_latest_updates(interaction: discord.Interaction) -> None:
@@ -1420,7 +1565,6 @@ async def cmd_latest_updates(interaction: discord.Interaction) -> None:
         em.description = "Could not retrieve announcements right now."
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="release_notes", description="Official Roblox release notes")
 async def cmd_release_notes(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
@@ -1433,7 +1577,6 @@ async def cmd_release_notes(interaction: discord.Interaction) -> None:
         em.description = "Could not retrieve release notes right now."
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="upcoming_features", description="Beta & upcoming Roblox features")
 async def cmd_upcoming_features(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
@@ -1445,7 +1588,6 @@ async def cmd_upcoming_features(interaction: discord.Interaction) -> None:
     else:
         em.description = "No upcoming features found right now."
     await interaction.followup.send(embed=em)
-
 
 @bot.tree.command(name="security_updates", description="Recent Roblox security patches and incidents")
 async def cmd_security_updates(interaction: discord.Interaction) -> None:
@@ -1468,7 +1610,6 @@ async def cmd_security_updates(interaction: discord.Interaction) -> None:
     em.set_footer(text="status.roblox.com + DevForum")
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="status", description="Full Roblox platform status")
 async def cmd_status(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
@@ -1488,7 +1629,6 @@ async def cmd_status(interaction: discord.Interaction) -> None:
         em.add_field(name=comp.get("name","?"), value=f"{'🟢' if comp.get('status')=='operational' else '🔴'} {s}", inline=True)
     em.set_footer(text="status.roblox.com")
     await interaction.followup.send(embed=em)
-
 
 @bot.tree.command(name="stats", description="Bot stats")
 async def cmd_stats(interaction: discord.Interaction) -> None:
@@ -1511,7 +1651,6 @@ async def cmd_stats(interaction: discord.Interaction) -> None:
     em.set_footer(text="Roblox Update Tracker")
     await interaction.response.send_message(embed=em)
 
-
 @bot.tree.command(name="changelog", description="Last 10 detected version changes")
 async def cmd_changelog(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
@@ -1524,7 +1663,6 @@ async def cmd_changelog(interaction: discord.Interaction) -> None:
         em.add_field(name="🎮 Client Updates", value="No updates detected this session.", inline=False)
     em.set_footer(text="Resets on restart")
     await interaction.response.send_message(embed=em)
-
 
 @bot.tree.command(name="compare_versions", description="Compare two Roblox version strings")
 @app_commands.describe(version1="First version string", version2="Second version string")
@@ -1546,7 +1684,6 @@ async def cmd_compare_versions(interaction: discord.Interaction, version1: str, 
     em.add_field(name="Version A", value=f"`{version1}`", inline=True)
     em.add_field(name="Version B", value=f"`{version2}`", inline=True)
     await interaction.response.send_message(embed=em)
-
 
 @bot.tree.command(name="game_status", description="Check status of a Roblox game by Place ID")
 @app_commands.describe(place_id="The Roblox Place ID")
@@ -1577,18 +1714,16 @@ async def cmd_game_status(interaction: discord.Interaction, place_id: str) -> No
     em.set_footer(text="Roblox Games API")
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="random_game", description="Get a random popular Roblox game")
 async def cmd_random_game(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
     await interaction.response.defer()
-    import random as rand
     d = await bot._json(ROBLOX_GAMES_LIST_URL)
     if not d or not d.get("games"):
         await interaction.followup.send("❌ Could not fetch games list.")
         return
     games = d["games"]
-    game = rand.choice(games)
+    game = random.choice(games)
     em = discord.Embed(title=f"🎲 Random Game: {game.get('name','?')}",
                        url=f"https://www.roblox.com/games/{game.get('placeId',0)}",
                        colour=0x9b5de5, timestamp=datetime.now(timezone.utc))
@@ -1596,7 +1731,6 @@ async def cmd_random_game(interaction: discord.Interaction) -> None:
     em.add_field(name="Visits",  value=f"{game.get('totalUpVotes',0):,} 👍", inline=True)
     em.set_footer(text="Roblox Games API")
     await interaction.followup.send(embed=em)
-
 
 @bot.tree.command(name="player_lookup", description="Look up a Roblox player by username")
 @app_commands.describe(username="Roblox username to look up")
@@ -1627,7 +1761,6 @@ async def cmd_player_lookup(interaction: discord.Interaction, username: str) -> 
     em.set_footer(text="Roblox Users API")
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="group_info", description="Look up a Roblox group by ID")
 @app_commands.describe(group_id="Roblox group ID")
 async def cmd_group_info(interaction: discord.Interaction, group_id: str) -> None:
@@ -1653,7 +1786,6 @@ async def cmd_group_info(interaction: discord.Interaction, group_id: str) -> Non
     em.set_footer(text="Roblox Groups API")
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="badge_check", description="Check if a user has a specific badge")
 @app_commands.describe(username="Roblox username", badge_id="Badge ID to check")
 async def cmd_badge_check(interaction: discord.Interaction, username: str, badge_id: str) -> None:
@@ -1676,7 +1808,6 @@ async def cmd_badge_check(interaction: discord.Interaction, username: str, badge
     em.add_field(name="Result", value="✅ Has this badge!" if has_it else "❌ Does not have this badge", inline=False)
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="robux_rates", description="Current Robux to USD exchange and DevEx rates")
 async def cmd_robux_rates(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
@@ -1687,7 +1818,6 @@ async def cmd_robux_rates(interaction: discord.Interaction) -> None:
     em.add_field(name="Gift Card",         value="$10 → 800 R$\n$25 → 2,000 R$\n$50 → 4,500 R$", inline=False)
     em.set_footer(text="Rates as of 2026 — check roblox.com for latest")
     await interaction.response.send_message(embed=em)
-
 
 @bot.tree.command(name="trade_calculator", description="Calculate if a Roblox trade is worth it based on RAP")
 @app_commands.describe(your_rap="Your items total RAP", their_rap="Their items total RAP")
@@ -1710,7 +1840,6 @@ async def cmd_trade_calculator(interaction: discord.Interaction, your_rap: int, 
     em.add_field(name="Difference", value=f"R${diff:+,}",     inline=True)
     em.set_footer(text="RAP = Recent Average Price")
     await interaction.response.send_message(embed=em)
-
 
 @bot.tree.command(name="limited_tracker", description="Check resale data for a Roblox limited item")
 @app_commands.describe(asset_id="Asset ID of the limited item")
@@ -1742,7 +1871,6 @@ async def cmd_limited_tracker(interaction: discord.Interaction, asset_id: str) -
     em.set_footer(text="Roblox Economy API")
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="ugc_trending", description="Trending UGC items on the Roblox catalog")
 async def cmd_ugc_trending(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
@@ -1758,7 +1886,6 @@ async def cmd_ugc_trending(interaction: discord.Interaction) -> None:
     else:
         em.description = "Could not fetch catalog right now."
     await interaction.followup.send(embed=em)
-
 
 @bot.tree.command(name="ugc_price", description="Check resale price of a UGC item")
 @app_commands.describe(asset_id="Roblox asset ID")
@@ -1783,7 +1910,6 @@ async def cmd_ugc_price(interaction: discord.Interaction, asset_id: str) -> None
     em.add_field(name="Total Volume",     value=f"{resale.get('volume',0):,} sales",         inline=True)
     em.set_footer(text="Roblox Economy API")
     await interaction.followup.send(embed=em)
-
 
 @bot.tree.command(name="ugc_watch", description="Watch a UGC item for price change alerts")
 @app_commands.describe(asset_id="Roblox asset ID to watch")
@@ -1813,7 +1939,6 @@ async def cmd_ugc_watch(interaction: discord.Interaction, asset_id: str) -> None
     em.set_footer(text="Checks every 30 min for price changes")
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="ugc_unwatch", description="Stop watching a UGC item")
 @app_commands.describe(asset_id="Asset ID to stop watching")
 async def cmd_ugc_unwatch(interaction: discord.Interaction, asset_id: str) -> None:
@@ -1829,7 +1954,6 @@ async def cmd_ugc_unwatch(interaction: discord.Interaction, asset_id: str) -> No
     else:
         await interaction.response.send_message("❌ That item is not being watched.")
 
-
 @bot.tree.command(name="ugc_watchlist", description="Show all watched UGC items")
 async def cmd_ugc_watchlist(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
@@ -1843,7 +1967,6 @@ async def cmd_ugc_watchlist(interaction: discord.Interaction) -> None:
     em.set_footer(text=f"{len(bot._watched_items)}/20 items • checks every 30 min")
     await interaction.response.send_message(embed=em)
 
-
 @bot.tree.command(name="alert_threshold", description="Only alert on UGC price changes above X percent")
 @app_commands.describe(percent="Minimum % change to trigger an alert (0 = any change)")
 async def cmd_alert_threshold(interaction: discord.Interaction, percent: float) -> None:
@@ -1852,7 +1975,6 @@ async def cmd_alert_threshold(interaction: discord.Interaction, percent: float) 
     await interaction.response.send_message(
         f"✅ UGC price alerts will only fire when price changes by **{bot._alert_threshold:.1f}%** or more."
     )
-
 
 @bot.tree.command(name="mute_updates", description="Pause auto-alerts for X hours")
 @app_commands.describe(hours="Number of hours to mute alerts (0 to unmute)")
@@ -1866,13 +1988,10 @@ async def cmd_mute_updates(interaction: discord.Interaction, hours: float) -> No
         bot._muted_until = time.time() + hours * 3600
         await interaction.response.send_message(f"🔕 Alerts muted for **{hours}h**. Resumes <t:{int(bot._muted_until)}:R>.")
 
-
 @bot.tree.command(name="filter_updates", description="Choose which update types to receive alerts for")
-@app_commands.describe(
-    client="Alert on Roblox client updates",
-    devforum="Alert on new DevForum announcements",
-    incident="Alert on Roblox status incidents",
-)
+@app_commands.describe(client="Alert on Roblox client updates",
+                       devforum="Alert on new DevForum announcements",
+                       incident="Alert on Roblox status incidents")
 @admin_check()
 async def cmd_filter_updates(interaction: discord.Interaction,
                               client: bool = True, devforum: bool = True, incident: bool = True) -> None:
@@ -1883,7 +2002,6 @@ async def cmd_filter_updates(interaction: discord.Interaction,
     em.add_field(name="📢 DevForum Alerts",     value="✅ On" if devforum else "❌ Off", inline=True)
     em.add_field(name="🚨 Incident Alerts",     value="✅ On" if incident else "❌ Off", inline=True)
     await interaction.response.send_message(embed=em)
-
 
 @bot.tree.command(name="server_stats", description="Show bot usage stats for this server")
 async def cmd_server_stats(interaction: discord.Interaction) -> None:
@@ -1900,7 +2018,6 @@ async def cmd_server_stats(interaction: discord.Interaction) -> None:
     em.add_field(name="🔕 Muted",               value="Yes" if time.time() < bot._muted_until else "No", inline=True)
     await interaction.response.send_message(embed=em)
 
-
 @bot.tree.command(name="poll", description="Create a quick Roblox poll")
 @app_commands.describe(question="Poll question", option_a="First option", option_b="Second option")
 async def cmd_poll(interaction: discord.Interaction, question: str, option_a: str, option_b: str) -> None:
@@ -1913,7 +2030,6 @@ async def cmd_poll(interaction: discord.Interaction, question: str, option_a: st
     message = await interaction.original_response()
     await message.add_reaction("🅰️")
     await message.add_reaction("🅱️")
-
 
 @bot.tree.command(name="uptime_history", description="Roblox incident history for the last 30 days")
 async def cmd_uptime_history(interaction: discord.Interaction) -> None:
@@ -1932,7 +2048,6 @@ async def cmd_uptime_history(interaction: discord.Interaction) -> None:
     em.set_footer(text="status.roblox.com")
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="deploy_history", description="Last 15 CDN deploy log entries")
 async def cmd_deploy_history(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
@@ -1945,14 +2060,12 @@ async def cmd_deploy_history(interaction: discord.Interaction) -> None:
         em.description = "Could not retrieve deploy history."
     await interaction.followup.send(embed=em)
 
-
 @bot.tree.command(name="set_update_channel", description="Set the alert channel (Admin only)")
 @admin_check()
 @app_commands.describe(channel="Channel to post alerts in")
 async def cmd_set_update_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
     bot.update_channel_id = channel.id
     await interaction.response.send_message(f"✅ Alerts will now post in {channel.mention}.")
-
 
 @bot.tree.command(name="help_roblox", description="Show all commands")
 async def cmd_help(interaction: discord.Interaction) -> None:
@@ -2078,11 +2191,9 @@ async def cmd_help(interaction: discord.Interaction) -> None:
     em.set_footer(text=f"Polls every {CHECK_INTERVAL_MINUTES} min • @everyone pings {'on' if PING_EVERYONE else 'off'}")
     await interaction.response.send_message(embed=em)
 
-
 # ---------------------------------------------------------------------------
-# 🔨 Moderation
+# 🔨 Moderation (Slash)
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="warn", description="Warn a user and log the reason")
 @app_commands.describe(member="Member to warn", reason="Reason for the warning")
 @mod_check()
@@ -2107,7 +2218,6 @@ async def cmd_warn(interaction: discord.Interaction, member: discord.Member, rea
     bot._add_audit("warn", interaction.user, f"Warned {member} ({member.id}): {reason}")
     await bot._log_action(em)
 
-
 @bot.tree.command(name="warnings", description="Show all warnings for a user")
 @app_commands.describe(member="Member to check")
 async def cmd_warnings(interaction: discord.Interaction, member: discord.Member) -> None:
@@ -2125,7 +2235,6 @@ async def cmd_warnings(interaction: discord.Interaction, member: discord.Member)
     em.set_footer(text=f"Total: {len(warns)} warning(s) • ID: {member.id}")
     await interaction.response.send_message(embed=em)
 
-
 @bot.tree.command(name="clearwarnings", description="Clear all warnings for a user")
 @app_commands.describe(member="Member to clear warnings for")
 @mod_check()
@@ -2142,7 +2251,6 @@ async def cmd_clearwarnings(interaction: discord.Interaction, member: discord.Me
     bot._add_audit("clearwarnings", interaction.user, f"Cleared {count} warnings for {member} ({member.id})")
     await bot._log_action(em)
 
-
 @bot.tree.command(name="kick", description="Kick a member from the server")
 @app_commands.describe(member="Member to kick", reason="Reason for the kick",
                        anonymous="Hide your identity from the kicked user (default: False)")
@@ -2150,25 +2258,21 @@ async def cmd_clearwarnings(interaction: discord.Interaction, member: discord.Me
 async def cmd_kick(interaction: discord.Interaction, member: discord.Member,
                    reason: str = "No reason provided", anonymous: bool = False) -> None:
     bot._command_uses += 1
-
     dm_sent = False
     if anonymous:
         dm_content = f"You have been **kicked** from **{interaction.guild.name}**.\nReason: {reason}"
     else:
         dm_content = f"You have been **kicked** from **{interaction.guild.name}** by {interaction.user.mention}.\nReason: {reason}"
-
     try:
         await member.send(dm_content)
         dm_sent = True
     except discord.Forbidden:
         pass
-
     try:
         await member.kick(reason=reason)
     except discord.Forbidden:
         await interaction.response.send_message("❌ I don't have permission to kick that member.", ephemeral=True)
         return
-
     em = discord.Embed(title="👢 Member Kicked", colour=0xff6b35, timestamp=datetime.now(timezone.utc))
     em.add_field(name="Member",   value=f"{member} ({member.id})", inline=False)
     em.add_field(name="Reason",   value=reason,                    inline=False)
@@ -2178,10 +2282,8 @@ async def cmd_kick(interaction: discord.Interaction, member: discord.Member,
     else:
         em.set_footer(text="Could not DM the user (DMs closed).")
     await interaction.response.send_message(embed=em)
-
     bot._add_audit("kick", interaction.user, f"Kicked {member} ({member.id}): {reason} (anonymous={anonymous})")
     await bot._log_action(em)
-
 
 @bot.tree.command(name="ban", description="Ban a member from the server")
 @app_commands.describe(member="Member to ban", reason="Reason for the ban",
@@ -2190,34 +2292,27 @@ async def cmd_kick(interaction: discord.Interaction, member: discord.Member,
 async def cmd_ban(interaction: discord.Interaction, member: discord.Member,
                   reason: str = "No reason provided", anonymous: bool = False) -> None:
     bot._command_uses += 1
-
     dm_sent = False
     if anonymous:
         dm_content = f"You have been **banned** from **{interaction.guild.name}**.\nReason: {reason}"
     else:
         dm_content = f"You have been **banned** from **{interaction.guild.name}** by {interaction.user.mention}.\nReason: {reason}"
-
     try:
         await member.send(dm_content)
         dm_sent = True
     except discord.Forbidden:
         pass
-
     try:
         await member.ban(reason=reason, delete_message_days=0)
     except discord.Forbidden:
         await interaction.response.send_message("❌ I don't have permission to ban that member.", ephemeral=True)
         return
-
     bot._banned_users[str(member.id)] = {
-        "user": str(member),
-        "reason": reason,
-        "banned_by": "Anonymous" if anonymous else str(interaction.user),
-        "timestamp": time.time(),
+        "user": str(member), "reason": reason,
+        "banned_by": "Anonymous" if anonymous else str(interaction.user), "timestamp": time.time()
     }
     bot._cleanup_banned_users()
     bot._save_data()
-
     em = discord.Embed(title="🔨 Member Banned", colour=0xe63946, timestamp=datetime.now(timezone.utc))
     em.add_field(name="Member",  value=f"{member} ({member.id})", inline=False)
     em.add_field(name="Reason",  value=reason,                    inline=False)
@@ -2227,10 +2322,8 @@ async def cmd_ban(interaction: discord.Interaction, member: discord.Member,
     else:
         em.set_footer(text="Could not DM the user (DMs closed).")
     await interaction.response.send_message(embed=em)
-
     bot._add_audit("ban", interaction.user, f"Banned {member} ({member.id}): {reason} (anonymous={anonymous})")
     await bot._log_action(em)
-
 
 @bot.tree.command(name="unban", description="Unban a user by ID")
 @app_commands.describe(user_id="The Discord ID of the banned user")
@@ -2241,7 +2334,6 @@ async def cmd_unban(interaction: discord.Interaction, user_id: str) -> None:
     if not guild:
         await interaction.response.send_message("❌ Must be used in a server.", ephemeral=True)
         return
-
     try:
         user = await bot.fetch_user(int(user_id))
         await guild.unban(user, reason=f"Unbanned by {interaction.user}")
@@ -2254,20 +2346,17 @@ async def cmd_unban(interaction: discord.Interaction, user_id: str) -> None:
     except discord.Forbidden:
         await interaction.response.send_message("❌ I don't have permission to unban.", ephemeral=True)
 
-
 @bot.tree.command(name="banned_list", description="Show users banned in the last 7 days")
 @mod_check()
 async def cmd_banned_list(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
     bot._cleanup_banned_users()
-
     em = discord.Embed(title="📜 Recently Banned Users (Last 7 Days)", colour=0xff6b35,
                        timestamp=datetime.now(timezone.utc))
     if not bot._banned_users:
         em.description = "✅ No users have been banned recently."
         await interaction.response.send_message(embed=em)
         return
-
     entries = sorted(bot._banned_users.values(), key=lambda x: x["timestamp"], reverse=True)
     for entry in entries[:20]:
         ts = int(entry["timestamp"])
@@ -2282,7 +2371,6 @@ async def cmd_banned_list(interaction: discord.Interaction) -> None:
         )
     em.set_footer(text=f"{len(bot._banned_users)} total banned user(s) in the list")
     await interaction.response.send_message(embed=em)
-
 
 @bot.tree.command(name="timeout", description="Timeout a member for X minutes")
 @app_commands.describe(member="Member to timeout", minutes="Duration in minutes", reason="Reason")
@@ -2307,11 +2395,9 @@ async def cmd_timeout(interaction: discord.Interaction, member: discord.Member,
     bot._add_audit("timeout", interaction.user, f"Timed out {member} ({member.id}) for {minutes}m: {reason}")
     await bot._log_action(em)
 
-
 # ---------------------------------------------------------------------------
 # 📢 Announcements
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="announce", description="Post a formatted announcement embed to any channel")
 @app_commands.describe(channel="Channel to post in", title="Announcement title", message="Announcement message",
                         color="Embed color hex (e.g. ff0000) — optional")
@@ -2336,7 +2422,6 @@ async def cmd_announce(interaction: discord.Interaction, channel: discord.TextCh
         title="📢 Announcement Sent", colour=0x4cc9f0,
         description=f"**Channel:** {channel.mention}\n**Title:** {title}\n**By:** {interaction.user}"
     ))
-
 
 @bot.tree.command(name="dm_blast", description="DM all members with a message (Admin only)")
 @app_commands.describe(message="Message to DM to all members")
@@ -2366,7 +2451,6 @@ async def cmd_dm_blast(interaction: discord.Interaction, message: str) -> None:
     )
     bot._add_audit("dm_blast", interaction.user, f"DM blast to {sent} members: {message[:80]}")
 
-
 @bot.tree.command(name="schedule_announcement", description="Schedule a message to post at a specific time")
 @app_commands.describe(channel="Channel to post in", title="Announcement title", message="Message content",
                         minutes_from_now="Minutes from now to send (e.g. 60 = 1 hour)")
@@ -2395,11 +2479,9 @@ async def cmd_schedule(interaction: discord.Interaction, channel: discord.TextCh
     await interaction.response.send_message(embed=em)
     bot._add_audit("schedule_announcement", interaction.user, f"Scheduled to #{channel.name} in {minutes_from_now}m")
 
-
 # ---------------------------------------------------------------------------
 # 📊 Logging
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="set_log_channel", description="Set the channel for bot action logs (Admin only)")
 @app_commands.describe(channel="Channel to log bot actions to")
 @admin_check()
@@ -2409,7 +2491,6 @@ async def cmd_set_log_channel(interaction: discord.Interaction, channel: discord
     bot._save_data()
     await interaction.response.send_message(f"✅ Bot actions will now be logged in {channel.mention}.")
     bot._add_audit("set_log_channel", interaction.user, f"Log channel set to #{channel.name}")
-
 
 @bot.tree.command(name="audit", description="Show the last 15 bot actions and who triggered them")
 @mod_check()
@@ -2427,11 +2508,9 @@ async def cmd_audit(interaction: discord.Interaction) -> None:
         em.description = "No audit log entries yet."
     await interaction.response.send_message(embed=em)
 
-
 # ---------------------------------------------------------------------------
 # 🎭 Roles
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="set_ping_role", description="Ping a specific role instead of @everyone for updates (Admin only)")
 @app_commands.describe(role="Role to ping for updates (leave blank to use @everyone)")
 @admin_check()
@@ -2445,7 +2524,6 @@ async def cmd_set_ping_role(interaction: discord.Interaction, role: discord.Role
         await interaction.response.send_message("✅ Reverted to @everyone pings.")
     bot._add_audit("set_ping_role", interaction.user, f"Ping role set to {role} ({role.id})" if role else "Ping role cleared")
 
-
 @bot.tree.command(name="autorole", description="Automatically give new members a role when they join (Admin only)")
 @app_commands.describe(role="Role to assign on join (leave blank to disable)")
 @admin_check()
@@ -2458,7 +2536,6 @@ async def cmd_autorole(interaction: discord.Interaction, role: discord.Role | No
     else:
         await interaction.response.send_message("✅ Auto-role has been disabled.")
     bot._add_audit("autorole", interaction.user, f"Auto-role set to {role}" if role else "Auto-role disabled")
-
 
 @bot.tree.command(name="role_info", description="Show info about a role")
 @app_commands.describe(role="The role to inspect")
@@ -2480,11 +2557,9 @@ async def cmd_role_info(interaction: discord.Interaction, role: discord.Role) ->
     em.set_footer(text=f"Managed: {'Yes' if role.managed else 'No'}")
     await interaction.response.send_message(embed=em)
 
-
 # ---------------------------------------------------------------------------
 # ⚙️ Configuration
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="set_prefix", description="Change the bot prefix (Admin only)")
 @app_commands.describe(prefix="New prefix (e.g. ! or . or $)")
 @admin_check()
@@ -2498,7 +2573,6 @@ async def cmd_set_prefix(interaction: discord.Interaction, prefix: str) -> None:
     await interaction.response.send_message(f"✅ Prefix set to `{prefix}`.")
     bot._add_audit("set_prefix", interaction.user, f"Prefix changed to '{prefix}'")
 
-
 @bot.tree.command(name="bot_info", description="Show full bot configuration")
 async def cmd_bot_info(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
@@ -2506,16 +2580,13 @@ async def cmd_bot_info(interaction: discord.Interaction) -> None:
     h, rem = divmod(uptime, 3600)
     m, s = divmod(rem, 60)
     guild = interaction.guild
-
     def fmt_channel(cid: int | None) -> str:
         return f"<#{cid}>" if cid else "Not set"
-
     def fmt_role(rid: int | None) -> str:
         if not rid or not guild:
             return "Not set"
         r = guild.get_role(rid)
         return r.mention if r else f"Unknown ({rid})"
-
     em = discord.Embed(title="⚙️ Full Bot Configuration", colour=0x4cc9f0,
                        timestamp=datetime.now(timezone.utc))
     em.add_field(name="🤖 Bot",             value=str(bot.user),                                     inline=True)
@@ -2532,7 +2603,6 @@ async def cmd_bot_info(interaction: discord.Interaction) -> None:
     em.add_field(name="🕐 Scheduled",       value=str(len(bot._scheduled)),                         inline=True)
     em.set_footer(text="Roblox Update Tracker")
     await interaction.response.send_message(embed=em)
-
 
 @bot.tree.command(name="reset_settings", description="Reset all bot settings to defaults (Admin only)")
 @admin_check()
@@ -2570,7 +2640,6 @@ async def cmd_reset_settings(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=em)
     bot._add_audit("reset_settings", interaction.user, "All settings reset to defaults")
 
-
 @bot.tree.command(name="backup_settings", description="Export all current bot settings as a JSON backup")
 @admin_check()
 async def cmd_backup_settings(interaction: discord.Interaction) -> None:
@@ -2604,11 +2673,9 @@ async def cmd_backup_settings(interaction: discord.Interaction) -> None:
     )
     bot._add_audit("backup_settings", interaction.user, "Settings backup exported")
 
-
 # ---------------------------------------------------------------------------
 # 🧹 Purge
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="purge", description="Bulk-delete up to 100 messages in a channel")
 @app_commands.describe(amount="Number of messages to delete (1–100)",
                         channel="Channel to purge (defaults to current)")
@@ -2644,11 +2711,9 @@ async def cmd_purge(interaction: discord.Interaction,
     bot._add_audit("purge", interaction.user, f"Purged {len(deleted)} messages in #{ch.name}")
     await bot._log_action(em)
 
-
 # ---------------------------------------------------------------------------
 # 🛡️ Anti-raid
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="antiraid_on", description="Manually enable anti-raid lockdown (Admin only)")
 @app_commands.describe(action="What to do with new joiners: kick or ban")
 @admin_check()
@@ -2668,7 +2733,6 @@ async def cmd_antiraid_on(interaction: discord.Interaction,
     bot._add_audit("antiraid_on", interaction.user, f"Lockdown enabled, action={bot._antiraid_action}")
     await bot._log_action(em)
 
-
 @bot.tree.command(name="antiraid_off", description="Disable anti-raid lockdown (Admin only)")
 @admin_check()
 async def cmd_antiraid_off(interaction: discord.Interaction) -> None:
@@ -2684,14 +2748,11 @@ async def cmd_antiraid_off(interaction: discord.Interaction) -> None:
     bot._add_audit("antiraid_off", interaction.user, "Lockdown disabled")
     await bot._log_action(em)
 
-
 @bot.tree.command(name="antiraid_config", description="Configure auto-raid detection thresholds (Admin only)")
-@app_commands.describe(
-    threshold="Number of joins to trigger lockdown (default 10)",
-    window="Time window in seconds (default 10)",
-    action="Action on new joiners during lockdown: kick or ban (default kick)",
-    auto="Enable automatic detection (default true)",
-)
+@app_commands.describe(threshold="Number of joins to trigger lockdown (default 10)",
+                        window="Time window in seconds (default 10)",
+                        action="Action on new joiners during lockdown: kick or ban (default kick)",
+                        auto="Enable automatic detection (default true)")
 @admin_check()
 async def cmd_antiraid_config(interaction: discord.Interaction,
                                threshold: int | None = None,
@@ -2720,7 +2781,6 @@ async def cmd_antiraid_config(interaction: discord.Interaction,
                    f"threshold={bot._antiraid_threshold} window={bot._antiraid_window}s "
                    f"action={bot._antiraid_action} auto={bot._antiraid_auto}")
 
-
 @bot.tree.command(name="antiraid_status", description="Show current anti-raid configuration and status")
 async def cmd_antiraid_status(interaction: discord.Interaction) -> None:
     bot._command_uses += 1
@@ -2739,11 +2799,9 @@ async def cmd_antiraid_status(interaction: discord.Interaction) -> None:
     em.set_footer(text="Use /antiraid_config to change thresholds • /antiraid_on|off to toggle")
     await interaction.response.send_message(embed=em)
 
-
 # ---------------------------------------------------------------------------
 # 🔑 Role-based permissions setup
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="set_mod_role", description="Set which role can use moderation commands (Admin only)")
 @app_commands.describe(role="Role to grant mod permissions (leave blank to clear)")
 @admin_check()
@@ -2756,7 +2814,6 @@ async def cmd_set_mod_role(interaction: discord.Interaction, role: discord.Role 
     else:
         await interaction.response.send_message("✅ Mod role cleared — only Discord permissions apply.")
     bot._add_audit("set_mod_role", interaction.user, f"Mod role → {role}" if role else "Mod role cleared")
-
 
 @bot.tree.command(name="set_admin_role", description="Set which role can use admin commands (Admin only)")
 @app_commands.describe(role="Role to grant admin permissions (leave blank to clear)")
@@ -2771,11 +2828,9 @@ async def cmd_set_admin_role(interaction: discord.Interaction, role: discord.Rol
         await interaction.response.send_message("✅ Admin role cleared — only Administrator permission applies.")
     bot._add_audit("set_admin_role", interaction.user, f"Admin role → {role}" if role else "Admin role cleared")
 
-
 # ---------------------------------------------------------------------------
 # 🤬 Auto-mod commands
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="automod_enable", description="Enable automatic profanity moderation (Admin only)")
 @app_commands.describe(penalty="Punishment at strike 3+: timeout_week or kick (default: timeout_week)")
 @admin_check()
@@ -2796,7 +2851,6 @@ async def cmd_automod_enable(interaction: discord.Interaction, penalty: str | No
     await interaction.response.send_message(embed=em)
     bot._add_audit("automod_enable", interaction.user, f"penalty={bot._automod_penalty}")
 
-
 @bot.tree.command(name="automod_disable", description="Disable automatic profanity moderation (Admin only)")
 @admin_check()
 async def cmd_automod_disable(interaction: discord.Interaction) -> None:
@@ -2805,7 +2859,6 @@ async def cmd_automod_disable(interaction: discord.Interaction) -> None:
     bot._save_data()
     await interaction.response.send_message("✅ Auto-mod disabled.")
     bot._add_audit("automod_disable", interaction.user)
-
 
 @bot.tree.command(name="automod_addword", description="Add a word to the profanity filter (Admin only)")
 @app_commands.describe(word="Word to block (case-insensitive, leet-speak resistant)")
@@ -2821,7 +2874,6 @@ async def cmd_automod_addword(interaction: discord.Interaction, word: str) -> No
     await interaction.response.send_message(f"✅ Added `{w}` to the filter. ({len(bot._automod_words)} words total)")
     bot._add_audit("automod_addword", interaction.user, f"Added: {w}")
 
-
 @bot.tree.command(name="automod_removeword", description="Remove a word from the profanity filter (Admin only)")
 @app_commands.describe(word="Word to remove")
 @admin_check()
@@ -2835,7 +2887,6 @@ async def cmd_automod_removeword(interaction: discord.Interaction, word: str) ->
     bot._save_data()
     await interaction.response.send_message(f"✅ Removed `{w}` from the filter. ({len(bot._automod_words)} words total)")
     bot._add_audit("automod_removeword", interaction.user, f"Removed: {w}")
-
 
 @bot.tree.command(name="automod_status", description="Show auto-mod configuration and word list")
 @mod_check()
@@ -2857,7 +2908,6 @@ async def cmd_automod_status(interaction: discord.Interaction) -> None:
     em.set_footer(text="Use /automod_addword and /automod_removeword to edit the list")
     await interaction.response.send_message(embed=em, ephemeral=True)
 
-
 @bot.tree.command(name="automod_logs", description="Show recent auto-mod violations (last 20)")
 @app_commands.describe(member="Filter to a specific member (optional)", page="Page number (default 1)")
 @mod_check()
@@ -2872,12 +2922,8 @@ async def cmd_automod_logs(interaction: discord.Interaction,
     total_pages = max(1, (len(entries) + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     slice_ = entries[(page - 1) * per_page : page * per_page]
-
-    em = discord.Embed(
-        title="🤬 Auto-Mod Violation Log",
-        colour=0xe63946,
-        timestamp=datetime.now(timezone.utc),
-    )
+    em = discord.Embed(title="🤬 Auto-Mod Violation Log", colour=0xe63946,
+                       timestamp=datetime.now(timezone.utc))
     if not slice_:
         em.description = "No violations recorded yet."
     else:
@@ -2897,7 +2943,6 @@ async def cmd_automod_logs(interaction: discord.Interaction,
         em.set_author(name=str(member), icon_url=member.display_avatar.url)
     await interaction.response.send_message(embed=em, ephemeral=True)
 
-
 @bot.tree.command(name="automod_clearstrikes", description="Clear strike count for a user (Admin only)")
 @app_commands.describe(member="Member to clear strikes for")
 @admin_check()
@@ -2909,7 +2954,6 @@ async def cmd_automod_clearstrikes(interaction: discord.Interaction, member: dis
         f"✅ Cleared **{old}** strike(s) for {member.mention}.", ephemeral=True
     )
     bot._add_audit("automod_clearstrikes", interaction.user, f"Cleared {old} strikes for {member} ({member.id})")
-
 
 @bot.tree.command(name="strike_leaderboard", description="Show the top users by total auto-mod strikes")
 @mod_check()
@@ -2923,13 +2967,11 @@ async def cmd_strike_leaderboard(interaction: discord.Interaction) -> None:
         user_names[uid] = entry["user"]
     for uid, count in bot._automod_strikes.items():
         totals[uid] = max(totals.get(uid, 0), count)
-
     if not totals:
         await interaction.response.send_message(
             "📊 No strikes recorded yet — the server is clean!", ephemeral=True
         )
         return
-
     ranked = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:15]
     medals = ["🥇", "🥈", "🥉"]
     lines = []
@@ -2938,7 +2980,6 @@ async def cmd_strike_leaderboard(interaction: discord.Interaction) -> None:
         name = user_names.get(uid, f"<@{uid}>")
         current = bot._automod_strikes.get(uid, 0)
         lines.append(f"{prefix} {name} — **{count}** violation(s)  *(active strikes: {current})*")
-
     em = discord.Embed(
         title="📊 Strike Leaderboard — Repeat Offenders",
         description="\n".join(lines),
@@ -2948,11 +2989,9 @@ async def cmd_strike_leaderboard(interaction: discord.Interaction) -> None:
     em.set_footer(text="Based on all recorded violations • /automod_clearstrikes to reset a user")
     await interaction.response.send_message(embed=em, ephemeral=True)
 
-
 # ---------------------------------------------------------------------------
 # 🚨 User reports
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="user_report", description="Anonymously report a member to the moderation team")
 @app_commands.describe(
     reported="The member you are reporting",
@@ -2970,20 +3009,16 @@ async def cmd_user_report(
     attachment3: discord.Attachment | None = None,
 ) -> None:
     bot._command_uses += 1
-
     if reported.id == interaction.user.id:
         await interaction.response.send_message("❌ You can't report yourself.", ephemeral=True)
         return
     if reported.bot:
         await interaction.response.send_message("❌ You can't report a bot.", ephemeral=True)
         return
-
     await interaction.response.defer(ephemeral=True)
-
     attachments = [a for a in [attachment, attachment2, attachment3] if a is not None]
     ts = datetime.now(timezone.utc)
     report_id = f"RPT-{int(ts.timestamp())}"
-
     bot._reports.append({
         "id":         report_id,
         "ts":         ts.isoformat(),
@@ -2996,13 +3031,8 @@ async def cmd_user_report(
     })
     bot._reports = bot._reports[-200:]
     bot._save_data()
-
     def make_embed(show_reporter: bool) -> discord.Embed:
-        em = discord.Embed(
-            title=f"🚨 Member Report  •  {report_id}",
-            colour=0xff6b6b,
-            timestamp=ts,
-        )
+        em = discord.Embed(title=f"🚨 Member Report  •  {report_id}", colour=0xff6b6b, timestamp=ts)
         em.add_field(name="Reported User", value=f"{reported.mention} (`{reported}` · {reported.id})", inline=False)
         em.add_field(name="Reason",        value=reason,                                                 inline=False)
         if show_reporter:
@@ -3014,7 +3044,6 @@ async def cmd_user_report(
         em.set_thumbnail(url=reported.display_avatar.url)
         em.set_footer(text=f"Server: {interaction.guild.name if interaction.guild else 'DM'}  •  {report_id}")
         return em
-
     log_em = make_embed(show_reporter=True)
     log_posted = False
     if bot._log_channel_id:
@@ -3030,7 +3059,6 @@ async def cmd_user_report(
                 log_posted = True
             except Exception as e:
                 log.warning("Could not post report to log channel: %s", e)
-
     dm_count = 0
     guild = interaction.guild
     if guild and (bot._mod_role_id or bot._admin_role_id):
@@ -3059,7 +3087,6 @@ async def cmd_user_report(
                     dm_count += 1
                 except Exception:
                     pass
-
     confirm_em = discord.Embed(
         title="✅ Report Submitted",
         description=(
@@ -3075,11 +3102,9 @@ async def cmd_user_report(
     await interaction.followup.send(embed=confirm_em, ephemeral=True)
     bot._add_audit("user_report", interaction.user, f"Reported {reported} ({reported.id}) — {report_id}")
 
-
 # ---------------------------------------------------------------------------
 # 📋 View / manage reports
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="view_reports", description="Browse member reports (Mod only)")
 @app_commands.describe(
     member="Filter to reports about a specific member (optional)",
@@ -3101,23 +3126,17 @@ async def cmd_view_reports(
             f"❌ Invalid status. Choose from: {', '.join(valid_statuses)}", ephemeral=True
         )
         return
-
     entries = list(reversed(bot._reports))
     if member:
         entries = [e for e in entries if e["reported_id"] == str(member.id)]
     if status != "all":
         entries = [e for e in entries if e.get("status", "open") == status]
-
     per_page = 5
     total_pages = max(1, (len(entries) + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     slice_ = entries[(page - 1) * per_page : page * per_page]
-
-    em = discord.Embed(
-        title="📋 Member Reports",
-        colour=0xff6b6b,
-        timestamp=datetime.now(timezone.utc),
-    )
+    em = discord.Embed(title="📋 Member Reports", colour=0xff6b6b,
+                       timestamp=datetime.now(timezone.utc))
     if not slice_:
         em.description = "No reports found matching those filters."
     else:
@@ -3142,7 +3161,6 @@ async def cmd_view_reports(
                 ),
                 inline=False,
             )
-
     em.set_footer(
         text=f"Page {page}/{total_pages} • {len(entries)} report(s) • "
              f"Use /resolve_report or /dismiss_report to act"
@@ -3150,7 +3168,6 @@ async def cmd_view_reports(
     if member:
         em.set_author(name=str(member), icon_url=member.display_avatar.url)
     await interaction.response.send_message(embed=em, ephemeral=True)
-
 
 @bot.tree.command(name="resolve_report", description="Mark a report as resolved (Mod only)")
 @app_commands.describe(report_id="The report ID e.g. RPT-1749602405", note="Optional closing note")
@@ -3172,7 +3189,6 @@ async def cmd_resolve_report(interaction: discord.Interaction, report_id: str, n
             return
     await interaction.response.send_message(f"❌ Report `{rid}` not found.", ephemeral=True)
 
-
 @bot.tree.command(name="dismiss_report", description="Dismiss a report (Mod only)")
 @app_commands.describe(report_id="The report ID e.g. RPT-1749602405", reason="Reason for dismissal")
 @mod_check()
@@ -3193,11 +3209,9 @@ async def cmd_dismiss_report(interaction: discord.Interaction, report_id: str, r
             return
     await interaction.response.send_message(f"❌ Report `{rid}` not found.", ephemeral=True)
 
-
 # ---------------------------------------------------------------------------
 # 🔄 Force sync (owner/admin utility)
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="sync", description="Force re-sync all slash commands to this server (Admin only)")
 @admin_check()
 async def cmd_sync(interaction: discord.Interaction) -> None:
@@ -3217,11 +3231,9 @@ async def cmd_sync(interaction: discord.Interaction) -> None:
     except Exception as e:
         await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
-
 # ---------------------------------------------------------------------------
 # ✨ Server Management Slash Commands
 # ---------------------------------------------------------------------------
-
 @bot.tree.command(name="setwelcome", description="Set the welcome channel and message (Admin)")
 @app_commands.describe(channel="Welcome channel", message="Welcome message (use {mention}, {server}, {user})")
 @admin_check()
