@@ -1,6 +1,6 @@
 """
 Roblox Update Tracker Bot — Ultimate Edition
-
+(type‑safe, ready for Replit / Railway)
 """
 
 import asyncio
@@ -69,7 +69,9 @@ DEFAULT_BAD_WORDS = [
 def _normalize(text: str) -> str:
     text = text.lower().translate(LEET_MAP)
     text = re.sub(r'[^a-z0-9\s]', '', text)
+    # collapse repeated letters (fuuuck → fuck)
     text = re.sub(r'(.)\1{2,}', r'\1\1', text)
+    # collapse spaced-out letters (f u c k → fuck)
     text = re.sub(r'(?<!\w)(\w)\s+(?=(\w\s)*\w(?!\w))', r'\1', text)
     return text
 
@@ -122,14 +124,18 @@ class RobloxBot(discord.Client):
         self._join_times: collections.deque[float] = collections.deque()
         self._mod_role_id: int | None = None
         self._admin_role_id: int | None = None
-        self._automod_enabled: bool = False
+        # ----- AUTO-MOD ENABLED BY DEFAULT -----
+        self._automod_enabled: bool = True
         self._automod_words: list[str] = list(DEFAULT_BAD_WORDS)
         self._automod_strikes: dict[str, int] = {}
         self._automod_penalty: str = "timeout_week"
         self._automod_log: list[dict] = []
         self._reports: list[dict] = []
+        # ----- Banned users list (7‑day expiry) -----
+        self._banned_users: dict[str, dict] = {}   # user_id (str) -> {user, reason, banned_by, timestamp}
 
         self._load_data()
+        self._cleanup_banned_users()
 
     # -----------------------------------------------------------------------
     # Persistence
@@ -157,11 +163,16 @@ class RobloxBot(discord.Client):
             self._antiraid_action    = d.get("antiraid_action", "kick")
             self._mod_role_id        = d.get("mod_role_id")
             self._admin_role_id      = d.get("admin_role_id")
-            self._automod_enabled    = d.get("automod_enabled", False)
+            self._automod_enabled    = d.get("automod_enabled", True)
             self._automod_words      = d.get("automod_words", list(DEFAULT_BAD_WORDS))
             self._automod_penalty    = d.get("automod_penalty", "timeout_week")
             self._automod_log        = d.get("automod_log", [])
             self._reports            = d.get("reports", [])
+            raw_banned = d.get("banned_users", {})
+            self._banned_users = {}
+            for uid, data in raw_banned.items():
+                data["timestamp"] = float(data.get("timestamp", 0))
+                self._banned_users[uid] = data
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
@@ -190,9 +201,19 @@ class RobloxBot(discord.Client):
                     "automod_penalty":    self._automod_penalty,
                     "automod_log":        self._automod_log[-100:],
                     "reports":            self._reports[-200:],
+                    "banned_users":       self._banned_users,
                 }, f, indent=2)
         except Exception as e:
             log.warning("Failed to save data: %s", e)
+
+    def _cleanup_banned_users(self) -> None:
+        now = time.time()
+        expired = [uid for uid, data in self._banned_users.items()
+                   if now - data.get("timestamp", 0) > 7 * 24 * 3600]
+        for uid in expired:
+            del self._banned_users[uid]
+        if expired:
+            self._save_data()
 
     def _add_audit(self, action: str, user: discord.User | discord.Member, detail: str = "") -> None:
         self._audit_log.append({
@@ -451,6 +472,8 @@ class RobloxBot(discord.Client):
         if len(remaining) != len(self._scheduled):
             self._scheduled = remaining
             self._save_data()
+        # Also periodically clean up old banned users
+        self._cleanup_banned_users()
 
     @check_scheduled.before_loop
     async def before_scheduled(self) -> None:
@@ -743,7 +766,7 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
             await interaction.response.send_message("❌ An error occurred.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
-# Commands (all kept as originally, with minor type safety additions)
+# Commands
 # ---------------------------------------------------------------------------
 
 @bot.tree.command(name="roblox_version", description="Current live Roblox client version")
@@ -1355,8 +1378,10 @@ async def cmd_help(interaction: discord.Interaction) -> None:
             ("/warn",              "Warn a user and log it"),
             ("/warnings",          "See all warnings for a user"),
             ("/clearwarnings",     "Clear a user's warnings"),
-            ("/kick",              "Kick a user with a reason"),
-            ("/ban",               "Ban a user with a reason"),
+            ("/kick",              "Kick a user (optionally anonymous)"),
+            ("/ban",               "Ban a user (optionally anonymous, saved to 7‑day list)"),
+            ("/unban",             "Unban a user by ID (optionally anonymous)"),
+            ("/banned_list",       "Show recently banned users (last 7 days)"),
             ("/timeout",           "Timeout a user for X minutes"),
         ],
         "📢 Announcements": [
@@ -1482,41 +1507,189 @@ async def cmd_clearwarnings(interaction: discord.Interaction, member: discord.Me
 
 
 @bot.tree.command(name="kick", description="Kick a member from the server")
-@app_commands.describe(member="Member to kick", reason="Reason for the kick")
+@app_commands.describe(member="Member to kick", reason="Reason for the kick",
+                       anonymous="Hide your identity from the kicked user (default: False)")
 @mod_check()
-async def cmd_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided") -> None:
+async def cmd_kick(interaction: discord.Interaction, member: discord.Member,
+                   reason: str = "No reason provided", anonymous: bool = False) -> None:
     bot._command_uses += 1
+
+    dm_sent = False
+    if anonymous:
+        dm_content = f"You have been **kicked** from **{interaction.guild.name}**.\nReason: {reason}"
+    else:
+        dm_content = f"You have been **kicked** from **{interaction.guild.name}** by {interaction.user.mention}.\nReason: {reason}"
+
+    try:
+        await member.send(dm_content)
+        dm_sent = True
+    except discord.Forbidden:
+        pass
+
     try:
         await member.kick(reason=reason)
     except discord.Forbidden:
         await interaction.response.send_message("❌ I don't have permission to kick that member.", ephemeral=True)
         return
+
     em = discord.Embed(title="👢 Member Kicked", colour=0xff6b35, timestamp=datetime.now(timezone.utc))
     em.add_field(name="Member",   value=f"{member} ({member.id})", inline=False)
     em.add_field(name="Reason",   value=reason,                    inline=False)
-    em.add_field(name="Kicked by",value=str(interaction.user),     inline=True)
+    em.add_field(name="Kicked by", value="Anonymous" if anonymous else str(interaction.user), inline=True)
+    if dm_sent:
+        em.set_footer(text="User was notified via DM.")
+    else:
+        em.set_footer(text="Could not DM the user (DMs closed).")
     await interaction.response.send_message(embed=em)
-    bot._add_audit("kick", interaction.user, f"Kicked {member} ({member.id}): {reason}")
+
+    bot._add_audit("kick", interaction.user, f"Kicked {member} ({member.id}): {reason} (anonymous={anonymous})")
     await bot._log_action(em)
 
 
 @bot.tree.command(name="ban", description="Ban a member from the server")
-@app_commands.describe(member="Member to ban", reason="Reason for the ban")
+@app_commands.describe(member="Member to ban", reason="Reason for the ban",
+                       anonymous="Hide your identity from the banned user (default: False)")
 @mod_check()
-async def cmd_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided") -> None:
+async def cmd_ban(interaction: discord.Interaction, member: discord.Member,
+                  reason: str = "No reason provided", anonymous: bool = False) -> None:
     bot._command_uses += 1
+
+    dm_sent = False
+    if anonymous:
+        dm_content = f"You have been **banned** from **{interaction.guild.name}**.\nReason: {reason}"
+    else:
+        dm_content = f"You have been **banned** from **{interaction.guild.name}** by {interaction.user.mention}.\nReason: {reason}"
+
+    try:
+        await member.send(dm_content)
+        dm_sent = True
+    except discord.Forbidden:
+        pass
+
     try:
         await member.ban(reason=reason, delete_message_days=0)
     except discord.Forbidden:
         await interaction.response.send_message("❌ I don't have permission to ban that member.", ephemeral=True)
         return
+
+    # Add to the 7‑day banned list
+    bot._banned_users[str(member.id)] = {
+        "user": str(member),
+        "reason": reason,
+        "banned_by": "Anonymous" if anonymous else str(interaction.user),
+        "timestamp": time.time(),
+    }
+    bot._cleanup_banned_users()
+    bot._save_data()
+
     em = discord.Embed(title="🔨 Member Banned", colour=0xe63946, timestamp=datetime.now(timezone.utc))
     em.add_field(name="Member",  value=f"{member} ({member.id})", inline=False)
     em.add_field(name="Reason",  value=reason,                    inline=False)
-    em.add_field(name="Banned by",value=str(interaction.user),    inline=True)
+    em.add_field(name="Banned by", value="Anonymous" if anonymous else str(interaction.user), inline=True)
+    if dm_sent:
+        em.set_footer(text="User was notified via DM.")
+    else:
+        em.set_footer(text="Could not DM the user (DMs closed).")
     await interaction.response.send_message(embed=em)
-    bot._add_audit("ban", interaction.user, f"Banned {member} ({member.id}): {reason}")
+
+    bot._add_audit("ban", interaction.user, f"Banned {member} ({member.id}): {reason} (anonymous={anonymous})")
     await bot._log_action(em)
+
+
+@bot.tree.command(name="unban", description="Unban a user by ID (from the 7‑day list)")
+@app_commands.describe(user_id="The Discord ID of the banned user",
+                       anonymous="Hide your identity in the audit log (default: False)")
+@mod_check()
+async def cmd_unban(interaction: discord.Interaction, user_id: str,
+                    anonymous: bool = False) -> None:
+    bot._command_uses += 1
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("❌ Must be used in a server.", ephemeral=True)
+        return
+
+    if user_id not in bot._banned_users:
+        try:
+            user = await bot.fetch_user(int(user_id))
+            await guild.unban(user, reason=f"Unbanned by {interaction.user}")
+            await interaction.response.send_message(f"✅ Unbanned `{user}` (not in the 7‑day list).", ephemeral=True)
+            bot._add_audit("unban", interaction.user, f"Unbanned {user} ({user.id}) (not in list)")
+            return
+        except discord.NotFound:
+            await interaction.response.send_message("❌ User not found in ban list or Discord.", ephemeral=True)
+            return
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to unban.", ephemeral=True)
+            return
+
+    ban_data = bot._banned_users[user_id]
+    try:
+        user = await bot.fetch_user(int(user_id))
+        await guild.unban(user, reason=f"Unbanned by {interaction.user}")
+    except discord.NotFound:
+        pass
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to unban.", ephemeral=True)
+        return
+
+    del bot._banned_users[user_id]
+    bot._save_data()
+
+    dm_sent = False
+    try:
+        if anonymous:
+            dm_content = f"You have been **unbanned** from **{guild.name}**."
+        else:
+            dm_content = f"You have been **unbanned** from **{guild.name}** by {interaction.user.mention}."
+        await user.send(dm_content)
+        dm_sent = True
+    except Exception:
+        pass
+
+    em = discord.Embed(title="🔓 Member Unbanned", colour=0x06d6a0,
+                       timestamp=datetime.now(timezone.utc))
+    em.add_field(name="User",  value=f"{user} ({user.id})", inline=False)
+    em.add_field(name="Unbanned by", value="Anonymous" if anonymous else str(interaction.user), inline=True)
+    if dm_sent:
+        em.set_footer(text="User was notified via DM.")
+    else:
+        em.set_footer(text="Could not DM the user.")
+    await interaction.response.send_message(embed=em)
+
+    bot._add_audit("unban", interaction.user, f"Unbanned {user} ({user.id})")
+    await bot._log_action(em)
+
+
+@bot.tree.command(name="banned_list", description="Show users banned in the last 7 days")
+@mod_check()
+async def cmd_banned_list(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    bot._cleanup_banned_users()
+
+    em = discord.Embed(title="📜 Recently Banned Users (Last 7 Days)", colour=0xff6b35,
+                       timestamp=datetime.now(timezone.utc))
+    if not bot._banned_users:
+        em.description = "✅ No users have been banned recently."
+        await interaction.response.send_message(embed=em)
+        return
+
+    entries = list(bot._banned_users.values())
+    entries.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+
+    for entry in entries[:20]:
+        timestamp = entry.get("timestamp", 0)
+        time_str = f"<t:{int(timestamp)}:R>" if timestamp else "Unknown"
+        em.add_field(
+            name=f"{entry.get('user', 'Unknown')}",
+            value=(
+                f"**Reason:** {entry.get('reason', 'N/A')}\n"
+                f"**Banned by:** {entry.get('banned_by', 'Unknown')}\n"
+                f"**When:** {time_str}"
+            ),
+            inline=False,
+        )
+    em.set_footer(text=f"{len(bot._banned_users)} total banned user(s) in the list")
+    await interaction.response.send_message(embed=em)
 
 
 @bot.tree.command(name="timeout", description="Timeout a member for X minutes")
@@ -1784,6 +1957,12 @@ async def cmd_reset_settings(interaction: discord.Interaction) -> None:
     bot._alert_threshold = 0.0
     bot._watched_items   = {}
     bot._muted_until     = 0
+    bot._automod_enabled = True
+    bot._automod_words   = list(DEFAULT_BAD_WORDS)
+    bot._automod_penalty = "timeout_week"
+    bot._automod_strikes = {}
+    bot._automod_log     = []
+    bot._banned_users    = {}
     bot._save_data()
     em = discord.Embed(title="🔄 Settings Reset", description="All bot settings have been reset to defaults.",
                        colour=0xe63946, timestamp=datetime.now(timezone.utc))
@@ -1809,6 +1988,10 @@ async def cmd_backup_settings(interaction: discord.Interaction) -> None:
         "watched_items":   {str(k): v for k, v in bot._watched_items.items()},
         "scheduled_count": len(bot._scheduled),
         "audit_entries":   len(bot._audit_log),
+        "automod_enabled": bot._automod_enabled,
+        "automod_words":   bot._automod_words,
+        "automod_penalty": bot._automod_penalty,
+        "banned_users":    bot._banned_users,
     }
     import io
     buf = io.BytesIO(json.dumps(data, indent=2).encode())
