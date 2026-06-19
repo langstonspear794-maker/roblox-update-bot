@@ -13,6 +13,7 @@ from discord.ext import tasks
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 PREFIX = os.getenv("PREFIX", "!")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+PING_EVERYONE = os.getenv("PING_EVERYONE", "false").lower() == "true"
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")   # free from platform.deepseek.com
 
@@ -1353,10 +1354,675 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
             await interaction.response.send_message("❌ An error occurred.", ephemeral=True)
 
 # ================== ALL SLASH COMMANDS ==================
-# (The full set of slash commands from the earlier complete file is included here.
-#  Because of length, they are represented by this comment, but in the actual file
-#  they are all present – every command from roblox_version to sync, setwelcome, etc.
-#  The file continues with those definitions, and the entry point below.)
+@bot.tree.command(name="roblox_version", description="Current live Roblox client version")
+async def cmd_roblox_version(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    v = await bot.get_client_version()
+    now = datetime.now(timezone.utc)
+    em = discord.Embed(title="🚨 Roblox Update Info", description="Current live version from Roblox CDN.", colour=0xe63946, timestamp=now)
+    em.add_field(name="Platform", value="Windows", inline=False)
+    em.add_field(name="Version Hash", value=f"`{v or 'N/A'}`", inline=False)
+    em.add_field(name="Date", value=now.strftime("%B %d, %Y %I:%M %p"), inline=False)
+    em.set_footer(text=now.strftime("%m/%d/%Y %I:%M %p"))
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="latest_updates", description="Latest DevForum announcements")
+async def cmd_latest_updates(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    posts = await bot.get_devforum_posts(DEVFORUM_ANNOUNCEMENTS_URL, limit=5)
+    em = discord.Embed(title="📢 Latest DevForum Announcements", colour=0xffd166)
+    if posts:
+        for p in posts: em.add_field(name=p["title"], value=f"[Read more]({p['url']}) • {p['posts_count']} replies", inline=False)
+    else: em.description = "Could not retrieve announcements right now."
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="release_notes", description="Official Roblox release notes")
+async def cmd_release_notes(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    posts = await bot.get_devforum_posts(DEVFORUM_RELEASES_URL, limit=5)
+    em = discord.Embed(title="📋 Roblox Release Notes", colour=0x06d6a0)
+    if posts:
+        for p in posts: em.add_field(name=p["title"], value=f"[Read more]({p['url']}) • {p['posts_count']} replies", inline=False)
+    else: em.description = "Could not retrieve release notes right now."
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="upcoming_features", description="Beta & upcoming Roblox features")
+async def cmd_upcoming_features(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    posts = await bot.get_devforum_posts(DEVFORUM_BETA_URL, limit=5)
+    em = discord.Embed(title="🔭 Upcoming & Beta Features", colour=0x9b5de5)
+    if posts:
+        for p in posts: em.add_field(name=p["title"], value=f"[Read more]({p['url']}) • {p['posts_count']} replies", inline=False)
+    else: em.description = "No upcoming features found right now."
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="security_updates", description="Recent Roblox security patches and incidents")
+async def cmd_security_updates(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    incidents = await bot.get_unresolved_incidents()
+    posts = await bot.get_devforum_posts(DEVFORUM_ANNOUNCEMENTS_URL, limit=10)
+    sec = [p for p in posts if any(k in p["title"].lower() for k in ["security","patch","hotfix","vulnerability","exploit","fix"])]
+    em = discord.Embed(title="🔒 Security Updates & Patches", colour=0xe63946, timestamp=datetime.now(timezone.utc))
+    if incidents:
+        for inc in incidents[:3]:
+            icon = {"none":"🟢","minor":"🟡","major":"🟠","critical":"🔴"}.get(inc["impact"],"⚪")
+            em.add_field(name=f"{icon} {inc['name']}",
+                         value=f"`{inc['status'].replace('_',' ').title()}`\n{inc['latest_update'][:150]}\n[View]({inc['url']})", inline=False)
+    else: em.add_field(name="✅ No Active Incidents", value="Roblox is clean.", inline=False)
+    if sec:
+        em.add_field(name="━━━━━━━━━━━━━━", value="**Security DevForum Posts**", inline=False)
+        for p in sec[:3]: em.add_field(name=p["title"], value=f"[Read more]({p['url']})", inline=False)
+    em.set_footer(text="status.roblox.com + DevForum")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="status", description="Full Roblox platform status")
+async def cmd_status(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    data = await bot.get_status_summary()
+    if not data: await interaction.followup.send("❌ Could not reach status page."); return
+    page = data.get("status", {})
+    ind = page.get("indicator","none")
+    colors = {"none":0x06d6a0,"minor":0xffd166,"major":0xff6b35,"critical":0xe63946}
+    icons  = {"none":"🟢","minor":"🟡","major":"🟠","critical":"🔴"}
+    em = discord.Embed(title=f"{icons.get(ind,'⚪')} Roblox Platform Status",
+                       description=f"**{page.get('description','Unknown')}**",
+                       colour=colors.get(ind,0xaaa), timestamp=datetime.now(timezone.utc))
+    for comp in data.get("components",[])[:10]:
+        s = comp.get("status","?").replace("_"," ").title()
+        em.add_field(name=comp.get("name","?"), value=f"{'🟢' if comp.get('status')=='operational' else '🔴'} {s}", inline=True)
+    em.set_footer(text="status.roblox.com")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="game_status", description="Check status of a Roblox game by Place ID")
+@app_commands.describe(place_id="The Roblox Place ID")
+async def cmd_game_status(interaction: discord.Interaction, place_id: str) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    try: pid = int(place_id)
+    except ValueError: await interaction.followup.send("❌ Invalid Place ID."); return
+    uid = await bot.get_universe_id(pid)
+    if not uid: await interaction.followup.send("❌ Could not find that game."); return
+    game = await bot.get_game_info(uid)
+    if not game: await interaction.followup.send("❌ Could not fetch game info."); return
+    active = game.get("isActive", False)
+    em = discord.Embed(title=f"🎮 {game.get('name','Unknown')}", url=f"https://www.roblox.com/games/{pid}",
+                       colour=0x06d6a0 if active else 0xe63946, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Status", value="🟢 Active" if active else "🔴 Inactive", inline=True)
+    em.add_field(name="Playing", value=f"{game.get('playing',0):,}", inline=True)
+    em.add_field(name="Visits", value=f"{game.get('visits',0):,}", inline=True)
+    em.add_field(name="Creator", value=game.get("creator",{}).get("name","?"), inline=True)
+    em.add_field(name="Updated", value=game.get("updated","?")[:10], inline=True)
+    em.set_footer(text="Roblox Games API")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="player_lookup", description="Look up a Roblox player by username")
+@app_commands.describe(username="Roblox username to look up")
+async def cmd_player_lookup(interaction: discord.Interaction, username: str) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    user = await bot.lookup_user(username)
+    if not user: await interaction.followup.send("❌ Could not find that user."); return
+    uid = user.get("id")
+    if not uid: await interaction.followup.send("❌ User ID missing."); return
+    friends = await bot.get_friend_count(uid)
+    badges = await bot.get_user_badges(uid)
+    created = user.get("created","")[:10]
+    em = discord.Embed(title=f"👤 {user.get('displayName','?')} (@{user.get('name','?')})",
+                       url=f"https://www.roblox.com/users/{uid}/profile",
+                       colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="User ID", value=str(uid), inline=True)
+    em.add_field(name="Joined", value=created, inline=True)
+    em.add_field(name="Friends", value=str(friends), inline=True)
+    em.add_field(name="Badges", value=f"{len(badges)}+", inline=True)
+    em.add_field(name="Banned", value="✅ No" if not user.get("isBanned") else "❌ Yes", inline=True)
+    if user.get("description"): em.add_field(name="Bio", value=user["description"][:200], inline=False)
+    em.set_footer(text="Roblox Users API")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="ugc_trending", description="Trending UGC items on the Roblox catalog")
+async def cmd_ugc_trending(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    items = await bot.get_catalog_items(8)
+    em = discord.Embed(title="🛍️ Trending UGC Items", colour=0xf72585, timestamp=datetime.now(timezone.utc))
+    if items:
+        for item in items:
+            price_str = f"R${item['price']:,}" if item["price"] else "Free"
+            em.add_field(name=item["name"][:50], value=f"💰 {price_str} | 👤 {item['creator']}\n[View](https://www.roblox.com/catalog/{item['id']})", inline=True)
+    else: em.description = "Could not fetch catalog right now."
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="incidents", description="Current unresolved Roblox incidents")
+async def cmd_incidents(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    incidents = await bot.get_unresolved_incidents()
+    em = discord.Embed(title="🚨 Current Roblox Incidents", colour=0xe63946, timestamp=datetime.now(timezone.utc))
+    if incidents:
+        for inc in incidents:
+            icon = {"none":"🟢","minor":"🟡","major":"🟠","critical":"🔴"}.get(inc["impact"],"⚪")
+            em.add_field(name=f"{icon} {inc['name']}",
+                         value=f"`{inc['status'].replace('_',' ').title()}`\n{inc['latest_update'][:200]}\n[View]({inc['url']})",
+                         inline=False)
+    else: em.description = "✅ No active incidents — Roblox is operational!"
+    em.set_footer(text="status.roblox.com")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="incident_history", description="Roblox incident history for the last 30 days")
+async def cmd_incident_history(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    incidents = await bot.get_incident_history(10)
+    em = discord.Embed(title="📅 Roblox Incident History (Last 30 Days)", colour=0xff6b35, timestamp=datetime.now(timezone.utc))
+    if incidents:
+        for inc in incidents:
+            icon = {"none":"🟢","minor":"🟡","major":"🟠","critical":"🔴"}.get(inc["impact"],"⚪")
+            em.add_field(name=f"{icon} {inc['name']}",
+                         value=f"Status: `{inc['status'].replace('_',' ').title()}` | {inc['created_at']}\n[View]({inc['url']})",
+                         inline=False)
+    else: em.description = "✅ No incidents found in the last 30 days!"
+    em.set_footer(text="status.roblox.com")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="deploy_history", description="Last 15 CDN deploy log entries")
+async def cmd_deploy_history(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    entries = await bot.get_deploy_history(15)
+    em = discord.Embed(title="📦 CDN Deploy History", colour=0x4cc9f0)
+    if entries: em.description = f"```\n{chr(10).join(entries)[-3900:]}\n```"
+    else: em.description = "Could not retrieve deploy history."
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="watch_item", description="Watch a UGC item for price change alerts")
+@app_commands.describe(asset_id="Roblox asset ID to watch", threshold="Minimum % price change to alert (0 = any)")
+async def cmd_watch_item(interaction: discord.Interaction, asset_id: str, threshold: float = 0.0) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    try: aid = int(asset_id)
+    except ValueError: await interaction.followup.send("❌ Invalid asset ID."); return
+    if len(bot._watched_items) >= 20: await interaction.followup.send("❌ Already watching 20 items max."); return
+    resale = await bot.get_item_resale(aid)
+    details = await bot.get_item_details(aid)
+    if not resale: await interaction.followup.send("❌ Could not find that item."); return
+    name = details.get("name", f"Item {aid}") if details else f"Item {aid}"
+    price = resale.get("recentAveragePrice") or resale.get("originalPrice") or 0
+    bot._watched_items[aid] = {"name": name, "price": price}
+    if threshold > 0: bot._alert_threshold = threshold
+    em = discord.Embed(title="👁️ Now Watching", description=f"**[{name}](https://www.roblox.com/catalog/{aid})**",
+                       colour=0x06d6a0, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Current Price", value=f"R${price:,}", inline=True)
+    em.add_field(name="Watching", value=f"{len(bot._watched_items)}/20 items", inline=True)
+    em.set_footer(text="Checks every 30 min for price changes")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="unwatch_item", description="Stop watching a UGC item")
+@app_commands.describe(asset_id="Asset ID to stop watching")
+async def cmd_unwatch_item(interaction: discord.Interaction, asset_id: str) -> None:
+    bot._command_uses += 1
+    try: aid = int(asset_id)
+    except ValueError: await interaction.response.send_message("❌ Invalid asset ID."); return
+    if aid in bot._watched_items:
+        name = bot._watched_items.pop(aid).get("name", str(aid))
+        await interaction.response.send_message(f"✅ Stopped watching **{name}**.")
+    else: await interaction.response.send_message("❌ That item is not being watched.")
+
+@bot.tree.command(name="watched_items", description="Show all watched UGC items")
+async def cmd_watched_items(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    em = discord.Embed(title="👁️ UGC Watchlist", colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    if bot._watched_items:
+        for aid, info in bot._watched_items.items():
+            em.add_field(name=info.get("name", str(aid)), value=f"💰 R${info.get('price',0):,} | [View](https://www.roblox.com/catalog/{aid})", inline=True)
+    else: em.description = "No items watched. Use `/watch_item <asset_id>` to add one!"
+    em.set_footer(text=f"{len(bot._watched_items)}/20 items • checks every 30 min")
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="set_update_channel", description="Set the alert channel (Admin only)")
+@admin_check()
+@app_commands.describe(channel="Channel to post alerts in")
+async def cmd_set_update_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    bot.update_channel_id = channel.id
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Alerts will now post in {channel.mention}.")
+
+@bot.tree.command(name="set_ping_role", description="Ping a specific role instead of @everyone for updates (Admin only)")
+@app_commands.describe(role="Role to ping for updates (leave blank to use @everyone)")
+@admin_check()
+async def cmd_set_ping_role(interaction: discord.Interaction, role: discord.Role | None = None) -> None:
+    bot._command_uses += 1
+    bot._ping_role_id = role.id if role else None
+    bot._save_data()
+    if role: await interaction.response.send_message(f"✅ Updates will now ping {role.mention} instead of @everyone.")
+    else: await interaction.response.send_message("✅ Reverted to @everyone pings.")
+    bot._add_audit("set_ping_role", interaction.user, f"Ping role set to {role} ({role.id})" if role else "Ping role cleared")
+
+@bot.tree.command(name="set_alert_threshold", description="Only alert on UGC price changes above X percent")
+@app_commands.describe(percentage="Minimum % change to trigger an alert (0 = any change)")
+async def cmd_set_alert_threshold(interaction: discord.Interaction, percentage: float) -> None:
+    bot._command_uses += 1
+    bot._alert_threshold = max(0.0, percentage)
+    await interaction.response.send_message(f"✅ UGC price alerts will only fire when price changes by **{bot._alert_threshold:.1f}%** or more.")
+
+@bot.tree.command(name="toggle_filter", description="Toggle update filters (client/devforum/incident)")
+@app_commands.describe(filter_type="Filter to toggle: client, devforum, or incident")
+@admin_check()
+async def cmd_toggle_filter(interaction: discord.Interaction, filter_type: str) -> None:
+    bot._command_uses += 1
+    ft = filter_type.lower()
+    if ft not in bot._filters:
+        await interaction.response.send_message("❌ Invalid filter. Choose: client, devforum, incident", ephemeral=True); return
+    bot._filters[ft] = not bot._filters[ft]
+    bot._save_data()
+    state = "✅ On" if bot._filters[ft] else "❌ Off"
+    em = discord.Embed(title="🔍 Filter Toggled", colour=0x4cc9f0)
+    em.add_field(name=ft.title(), value=state, inline=True)
+    em.add_field(name="🎮 Client", value="✅ On" if bot._filters.get("client") else "❌ Off", inline=True)
+    em.add_field(name="📢 DevForum", value="✅ On" if bot._filters.get("devforum") else "❌ Off", inline=True)
+    em.add_field(name="🚨 Incident", value="✅ On" if bot._filters.get("incident") else "❌ Off", inline=True)
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="mute", description="Mute update notifications for X minutes")
+@app_commands.describe(minutes="Number of minutes to mute notifications")
+@admin_check()
+async def cmd_mute(interaction: discord.Interaction, minutes: int) -> None:
+    bot._command_uses += 1
+    if minutes <= 0:
+        bot._muted_until = 0
+        await interaction.response.send_message("🔔 Notifications have been **unmuted**.")
+    else:
+        bot._muted_until = time.time() + minutes * 60
+        await interaction.response.send_message(f"🔕 Notifications muted for **{minutes} min**. Resumes <t:{int(bot._muted_until)}:R>.")
+
+@bot.tree.command(name="unmute", description="Unmute update notifications")
+@admin_check()
+async def cmd_unmute(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    bot._muted_until = 0
+    await interaction.response.send_message("🔔 Notifications have been **unmuted**.")
+
+@bot.tree.command(name="stats", description="Bot stats")
+async def cmd_stats(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    uptime = int(time.time() - bot._start_time)
+    h, rem = divmod(uptime, 3600)
+    m, s = divmod(rem, 60)
+    muted = f"<t:{int(bot._muted_until)}:R>" if time.time() < bot._muted_until else "Not muted"
+    em = discord.Embed(title="📊 Bot Stats", colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="⏱️ Uptime", value=f"{h}h {m}m {s}s", inline=True)
+    em.add_field(name="🕐 Last Check", value=bot._last_check_time, inline=True)
+    em.add_field(name="🔄 Interval", value=f"Every 15 min", inline=True)
+    em.add_field(name="🎮 Client Version", value=f"`{bot._last_client_version or 'N/A'}`", inline=True)
+    em.add_field(name="🔔 @everyone", value="Enabled" if PING_EVERYONE else "Disabled", inline=True)
+    em.add_field(name="🔕 Muted", value=muted, inline=True)
+    em.add_field(name="📋 Changelog", value=f"{len(bot._client_changelog)} entries", inline=True)
+    em.add_field(name="👁️ Watched Items", value=str(len(bot._watched_items)), inline=True)
+    em.add_field(name="💬 Commands Used", value=str(bot._command_uses), inline=True)
+    em.add_field(name="🔍 Active Filters", value=", ".join(k for k,v in bot._filters.items() if v) or "None", inline=False)
+    em.set_footer(text="Roblox Update Tracker")
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="sync", description="Force re-sync all slash commands to this server (Admin only)")
+@admin_check()
+async def cmd_sync(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1; await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if not guild: await interaction.followup.send("❌ This command must be used in a server.", ephemeral=True); return
+    try:
+        bot.tree.copy_global_to(guild=guild); synced = await bot.tree.sync(guild=guild)
+        await interaction.followup.send(f"✅ Synced **{len(synced)}** command(s) to **{guild.name}**.", ephemeral=True)
+        log.info("Manual sync: %d commands to guild %s", len(synced), guild.id)
+    except Exception as e: await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
+
+@bot.tree.command(name="setwelcome", description="Set the welcome channel and message (Admin)")
+@app_commands.describe(channel="Welcome channel", message="Welcome message (use {mention}, {server}, {user})")
+@admin_check()
+async def cmd_setwelcome_slash(interaction: discord.Interaction, channel: discord.TextChannel, message: str) -> None:
+    bot._welcome_channel_id = channel.id; bot._welcome_message = message; bot._save_data()
+    await interaction.response.send_message(f"✅ Welcome channel set to {channel.mention} with message:\n{message}")
+
+@bot.tree.command(name="setverifiedrole", description="Set the role assigned on verification (Admin)")
+@app_commands.describe(role="Role to assign")
+@admin_check()
+async def cmd_setverifiedrole_slash(interaction: discord.Interaction, role: discord.Role) -> None:
+    bot._verified_role_id = role.id; bot._save_data()
+    await interaction.response.send_message(f"✅ Verified role set to {role.mention}.")
+
+@bot.tree.command(name="setsuggest", description="Set the channel for suggestions (Admin)")
+@app_commands.describe(channel="Channel for suggestions")
+@admin_check()
+async def cmd_setsuggest_slash(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    bot._suggestion_channel_id = channel.id; bot._save_data()
+    await interaction.response.send_message(f"✅ Suggestion channel set to {channel.mention}.")
+
+@bot.tree.command(name="setmodrole", description="Set which role can use moderation commands (Admin only)")
+@app_commands.describe(role="Role to grant mod permissions (leave blank to clear)")
+@admin_check()
+async def cmd_set_mod_role(interaction: discord.Interaction, role: discord.Role | None = None) -> None:
+    bot._command_uses += 1
+    bot._mod_role_id = role.id if role else None
+    bot._save_data()
+    if role: await interaction.response.send_message(f"✅ **{role.name}** can now use moderation commands.")
+    else: await interaction.response.send_message("✅ Mod role cleared — only Discord permissions apply.")
+    bot._add_audit("set_mod_role", interaction.user, f"Mod role → {role}" if role else "Mod role cleared")
+
+@bot.tree.command(name="setadminrole", description="Set which role can use admin commands (Admin only)")
+@app_commands.describe(role="Role to grant admin permissions (leave blank to clear)")
+@admin_check()
+async def cmd_set_admin_role(interaction: discord.Interaction, role: discord.Role | None = None) -> None:
+    bot._command_uses += 1
+    bot._admin_role_id = role.id if role else None
+    bot._save_data()
+    if role: await interaction.response.send_message(f"✅ **{role.name}** can now use admin commands.")
+    else: await interaction.response.send_message("✅ Admin role cleared — only Administrator permission applies.")
+    bot._add_audit("set_admin_role", interaction.user, f"Admin role → {role}" if role else "Admin role cleared")
+
+@bot.tree.command(name="setlogchannel", description="Set the channel for bot action logs (Admin only)")
+@app_commands.describe(channel="Channel to log bot actions to")
+@admin_check()
+async def cmd_set_log_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    bot._command_uses += 1
+    bot._log_channel_id = channel.id
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Bot actions will now be logged in {channel.mention}.")
+    bot._add_audit("set_log_channel", interaction.user, f"Log channel set to #{channel.name}")
+
+@bot.tree.command(name="kick", description="Kick a member from the server")
+@app_commands.describe(member="Member to kick", reason="Reason for the kick",
+                       anonymous="Hide your identity from the kicked user (default: False)")
+@mod_check()
+async def cmd_kick(interaction: discord.Interaction, member: discord.Member,
+                   reason: str = "No reason provided", anonymous: bool = False) -> None:
+    bot._command_uses += 1
+    dm_sent = False
+    if anonymous:
+        dm_content = f"You have been **kicked** from **{interaction.guild.name}**.\nReason: {reason}"
+    else:
+        dm_content = f"You have been **kicked** from **{interaction.guild.name}** by {interaction.user.mention}.\nReason: {reason}"
+    try:
+        await member.send(dm_content)
+        dm_sent = True
+    except discord.Forbidden: pass
+    try:
+        await member.kick(reason=reason)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to kick that member.", ephemeral=True)
+        return
+    em = discord.Embed(title="👢 Member Kicked", colour=0xff6b35, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Member", value=f"{member} ({member.id})", inline=False)
+    em.add_field(name="Reason", value=reason, inline=False)
+    em.add_field(name="Kicked by", value="Anonymous" if anonymous else str(interaction.user), inline=True)
+    if dm_sent: em.set_footer(text="User was notified via DM.")
+    else: em.set_footer(text="Could not DM the user (DMs closed).")
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("kick", interaction.user, f"Kicked {member} ({member.id}): {reason} (anonymous={anonymous})")
+    await bot._log_action(em)
+
+@bot.tree.command(name="ban", description="Ban a member from the server")
+@app_commands.describe(member="Member to ban", reason="Reason for the ban",
+                       anonymous="Hide your identity from the banned user (default: False)")
+@mod_check()
+async def cmd_ban(interaction: discord.Interaction, member: discord.Member,
+                  reason: str = "No reason provided", anonymous: bool = False) -> None:
+    bot._command_uses += 1
+    dm_sent = False
+    if anonymous:
+        dm_content = f"You have been **banned** from **{interaction.guild.name}**.\nReason: {reason}"
+    else:
+        dm_content = f"You have been **banned** from **{interaction.guild.name}** by {interaction.user.mention}.\nReason: {reason}"
+    try:
+        await member.send(dm_content)
+        dm_sent = True
+    except discord.Forbidden: pass
+    try:
+        await member.ban(reason=reason, delete_message_days=0)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to ban that member.", ephemeral=True)
+        return
+    bot._banned_users[str(member.id)] = {
+        "user": str(member), "reason": reason,
+        "banned_by": "Anonymous" if anonymous else str(interaction.user), "timestamp": time.time(),
+        "guild_id": interaction.guild.id
+    }
+    bot._cleanup_banned_users()
+    bot._save_data()
+    em = discord.Embed(title="🔨 Member Banned", colour=0xe63946, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Member", value=f"{member} ({member.id})", inline=False)
+    em.add_field(name="Reason", value=reason, inline=False)
+    em.add_field(name="Banned by", value="Anonymous" if anonymous else str(interaction.user), inline=True)
+    if dm_sent: em.set_footer(text="User was notified via DM.")
+    else: em.set_footer(text="Could not DM the user (DMs closed).")
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("ban", interaction.user, f"Banned {member} ({member.id}): {reason} (anonymous={anonymous})")
+    await bot._log_action(em)
+
+@bot.tree.command(name="unban", description="Unban a user by ID")
+@app_commands.describe(user_id="The Discord ID of the banned user")
+@mod_check()
+async def cmd_unban(interaction: discord.Interaction, user_id: str) -> None:
+    bot._command_uses += 1
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("❌ Must be used in a server.", ephemeral=True)
+        return
+    try:
+        user = await bot.fetch_user(int(user_id))
+        await guild.unban(user, reason=f"Unbanned by {interaction.user}")
+        if user_id in bot._banned_users:
+            del bot._banned_users[user_id]
+            bot._save_data()
+        await interaction.response.send_message(f"✅ Unbanned {user}.")
+    except discord.NotFound: await interaction.response.send_message("❌ User not found.", ephemeral=True)
+    except discord.Forbidden: await interaction.response.send_message("❌ I don't have permission to unban.", ephemeral=True)
+
+@bot.tree.command(name="timeout", description="Timeout a member for X minutes")
+@app_commands.describe(member="Member to timeout", duration="Duration in minutes", reason="Reason")
+@mod_check()
+async def cmd_timeout(interaction: discord.Interaction, member: discord.Member,
+                      duration: int, reason: str = "No reason provided") -> None:
+    bot._command_uses += 1
+    import datetime as dt
+    until = discord.utils.utcnow() + dt.timedelta(minutes=duration)
+    try:
+        await member.timeout(until, reason=reason)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to timeout that member.", ephemeral=True)
+        return
+    em = discord.Embed(title="⏱️ Member Timed Out", colour=0xffd166, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Member", value=f"{member.mention} ({member})", inline=False)
+    em.add_field(name="Duration", value=f"{duration} minute(s)", inline=True)
+    em.add_field(name="Expires", value=f"<t:{int(until.timestamp())}:R>", inline=True)
+    em.add_field(name="Reason", value=reason, inline=False)
+    em.add_field(name="By", value=str(interaction.user), inline=True)
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("timeout", interaction.user, f"Timed out {member} ({member.id}) for {duration}m: {reason}")
+    await bot._log_action(em)
+
+@bot.tree.command(name="warn", description="Warn a user and log the reason")
+@app_commands.describe(member="Member to warn", reason="Reason for the warning")
+@mod_check()
+async def cmd_warn(interaction: discord.Interaction, member: discord.Member, reason: str) -> None:
+    bot._command_uses += 1
+    uid = str(member.id)
+    entry = {"reason": reason, "by": str(interaction.user), "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
+    bot._warnings.setdefault(uid, []).append(entry)
+    bot._save_data()
+    count = len(bot._warnings[uid])
+    em = discord.Embed(title="⚠️ User Warned", colour=0xffd166, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Member", value=f"{member.mention} ({member})", inline=False)
+    em.add_field(name="Reason", value=reason, inline=False)
+    em.add_field(name="Total Warns", value=str(count), inline=True)
+    em.add_field(name="Warned by", value=str(interaction.user), inline=True)
+    em.set_footer(text=f"User ID: {member.id}")
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("warn", interaction.user, f"Warned {member} ({member.id}): {reason}")
+    await bot._log_action(em)
+
+@bot.tree.command(name="warnings", description="Show all warnings for a user")
+@app_commands.describe(member="Member to check")
+async def cmd_warnings(interaction: discord.Interaction, member: discord.Member) -> None:
+    bot._command_uses += 1
+    uid = str(member.id)
+    warns = bot._warnings.get(uid, [])
+    em = discord.Embed(title=f"⚠️ Warnings — {member.display_name}", colour=0xffd166, timestamp=datetime.now(timezone.utc))
+    if warns:
+        for i, w in enumerate(warns, 1):
+            em.add_field(name=f"#{i} — {w['time']}", value=f"**Reason:** {w['reason']}\n**By:** {w['by']}", inline=False)
+    else: em.description = "✅ This user has no warnings."
+    em.set_footer(text=f"Total: {len(warns)} warning(s) • ID: {member.id}")
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="clearwarnings", description="Clear all warnings for a user")
+@app_commands.describe(member="Member to clear warnings for")
+@mod_check()
+async def cmd_clearwarnings(interaction: discord.Interaction, member: discord.Member) -> None:
+    bot._command_uses += 1
+    uid = str(member.id)
+    count = len(bot._warnings.pop(uid, []))
+    bot._save_data()
+    em = discord.Embed(title="🗑️ Warnings Cleared", colour=0x06d6a0, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Member", value=f"{member.mention} ({member})", inline=False)
+    em.add_field(name="Warnings Removed", value=str(count), inline=True)
+    em.add_field(name="Cleared by", value=str(interaction.user), inline=True)
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("clearwarnings", interaction.user, f"Cleared {count} warnings for {member} ({member.id})")
+    await bot._log_action(em)
+
+@bot.tree.command(name="bannedlist", description="Show users banned in the last 7 days")
+@mod_check()
+async def cmd_banned_list(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    bot._cleanup_banned_users()
+    em = discord.Embed(title="📜 Recently Banned Users (Last 7 Days)", colour=0xff6b35, timestamp=datetime.now(timezone.utc))
+    if not bot._banned_users:
+        em.description = "✅ No users have been banned recently."
+        await interaction.response.send_message(embed=em)
+        return
+    entries = sorted(bot._banned_users.values(), key=lambda x: x["timestamp"], reverse=True)
+    for entry in entries[:20]:
+        ts = int(entry["timestamp"])
+        em.add_field(
+            name=f"{entry.get('user', 'Unknown')}",
+            value=f"**Reason:** {entry.get('reason', 'N/A')}\n**Banned by:** {entry.get('banned_by', 'Unknown')}\n**When:** <t:{ts}:R>",
+            inline=False,
+        )
+    em.set_footer(text=f"{len(bot._banned_users)} total banned user(s) in the list")
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="purge", description="Bulk-delete up to 100 messages in a channel")
+@app_commands.describe(count="Number of messages to delete (1–100)", channel="Channel to purge (defaults to current)")
+@mod_check()
+async def cmd_purge(interaction: discord.Interaction, count: int, channel: discord.TextChannel | None = None) -> None:
+    bot._command_uses += 1
+    ch: discord.TextChannel | None = channel or interaction.channel
+    if not ch or not isinstance(ch, discord.TextChannel):
+        await interaction.response.send_message("❌ Invalid channel.", ephemeral=True); return
+    if not 1 <= count <= 100:
+        await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        deleted = await ch.purge(limit=count)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to delete messages there.", ephemeral=True); return
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Failed to purge: {e}", ephemeral=True); return
+    await interaction.followup.send(f"🗑️ Deleted **{len(deleted)}** message(s) from {ch.mention}.", ephemeral=True)
+    em = discord.Embed(title="🗑️ Channel Purged", colour=0xff6b35, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Channel", value=ch.mention, inline=True)
+    em.add_field(name="Deleted", value=str(len(deleted)), inline=True)
+    em.add_field(name="By", value=str(interaction.user), inline=True)
+    bot._add_audit("purge", interaction.user, f"Purged {len(deleted)} messages in #{ch.name}")
+    await bot._log_action(em)
+
+@bot.tree.command(name="report", description="Anonymously report a member to the moderation team")
+@app_commands.describe(user="The member you are reporting", reason="Describe what happened")
+async def cmd_report(interaction: discord.Interaction, user: discord.Member, reason: str) -> None:
+    bot._command_uses += 1
+    if user.id == interaction.user.id: await interaction.response.send_message("❌ You can't report yourself.", ephemeral=True); return
+    if user.bot: await interaction.response.send_message("❌ You can't report a bot.", ephemeral=True); return
+    ts = datetime.now(timezone.utc); report_id = f"RPT-{int(ts.timestamp())}"
+    bot._reports.append({
+        "id": report_id, "ts": ts.isoformat(), "reporter_id": str(interaction.user.id),
+        "reported": f"{user} ({user.id})", "reported_id": str(user.id),
+        "reason": reason, "attachments": [],
+        "guild": str(interaction.guild.id) if interaction.guild else "unknown",
+    })
+    bot._reports = bot._reports[-200:]; bot._save_data()
+    em = discord.Embed(title=f"🚨 Member Report — {report_id}", colour=0xff6b6b, timestamp=ts)
+    em.add_field(name="Reported User", value=f"{user.mention} (`{user}` · {user.id})", inline=False)
+    em.add_field(name="Reason", value=reason, inline=False)
+    em.add_field(name="Reporter", value="*Anonymous*", inline=True)
+    if bot._log_channel_id:
+        ch = bot.get_channel(bot._log_channel_id)
+        if isinstance(ch, discord.abc.Messageable):
+            try: await ch.send(content="@here **New member report received**", embed=em)
+            except Exception: pass
+    await interaction.response.send_message(f"✅ Report `{report_id}` submitted. Staff will review it.", ephemeral=True)
+    bot._add_audit("report", interaction.user, f"Reported {user} ({user.id}) — {report_id}")
+
+@bot.tree.command(name="appeal", description="Appeal a ban (use in DMs or server)")
+async def cmd_appeal(interaction: discord.Interaction) -> None:
+    uid = str(interaction.user.id)
+    if uid not in bot._banned_users:
+        await interaction.response.send_message("❌ You are not currently in the ban list.", ephemeral=True)
+        return
+    ban_data = bot._banned_users[uid]
+    guild_id = ban_data.get("guild_id")
+    guild = bot.get_guild(guild_id) if guild_id else None
+    if not guild:
+        await interaction.response.send_message("❌ Could not find the server you were banned from.", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        f"To appeal your ban from **{guild.name}**, please DM the bot with `!appeal <your reason>`.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="announce", description="Post a formatted announcement embed to any channel")
+@app_commands.describe(message="Announcement message", channel="Channel to post in (defaults to current)")
+@mod_check()
+async def cmd_announce(interaction: discord.Interaction, message: str, channel: discord.TextChannel | None = None) -> None:
+    bot._command_uses += 1
+    ch = channel or interaction.channel
+    if not isinstance(ch, discord.TextChannel):
+        await interaction.response.send_message("❌ Invalid channel.", ephemeral=True); return
+    em = discord.Embed(description=message, colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    em.set_footer(text=f"Announced by {interaction.user.display_name}")
+    try:
+        await ch.send(embed=em)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I can't send messages in that channel.", ephemeral=True); return
+    await interaction.response.send_message(f"✅ Announcement posted in {ch.mention}.", ephemeral=True)
+    bot._add_audit("announce", interaction.user, f"Announced to #{ch.name}: {message[:80]}")
+
+@bot.tree.command(name="schedule", description="Schedule a message to post after X minutes")
+@app_commands.describe(minutes="Minutes from now to send", message="Message to send")
+@mod_check()
+async def cmd_schedule(interaction: discord.Interaction, minutes: int, message: str) -> None:
+    bot._command_uses += 1
+    if minutes < 1:
+        await interaction.response.send_message("❌ Must be at least 1 minute from now.", ephemeral=True); return
+    send_at = time.time() + minutes * 60
+    bot._scheduled.append({
+        "channel_id": interaction.channel_id, "title": "📢 Announcement", "message": message,
+        "send_at": send_at, "author": str(interaction.user),
+    })
+    bot._save_data()
+    ts = int(send_at)
+    em = discord.Embed(title="🕐 Announcement Scheduled", colour=0x9b5de5, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Sends", value=f"<t:{ts}:R> (<t:{ts}:f>)", inline=True)
+    em.add_field(name="Message", value=message[:200], inline=False)
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("schedule", interaction.user, f"Scheduled in {minutes}m: {message[:80]}")
+
+@bot.tree.command(name="poll", description="Create a poll with up to 4 options")
+@app_commands.describe(question="Poll question", option1="First option", option2="Second option",
+                        option3="Third option (optional)", option4="Fourth option (optional)")
+async def cmd_poll(interaction: discord.Interaction, question: str, option1: str, option2: str,
+                   option3: str | None = None, option4: str | None = None) -> None:
+    bot._command_uses += 1
+    em = discord.Embed(title=f"📊 {question}", colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    options = [o for o in [option1, option2, option3, option4] if o]
+    emojis = ["🅰️", "🅱️", "🇨", "🇩"]
+    for i, opt in enumerate(options):
+        em.add_field(name=emojis[i], value=opt, inline=True)
+    em.set_footer(text=f"Poll by {interaction.user.display_name}")
+    await interaction.response.send_message(embed=em)
+    message = await interaction.original_response()
+    for i in range(len(options)):
+        await message.add_reaction(emojis[i])
 
 # ================== ENTRY POINT ==================
 if __name__ == "__main__":
