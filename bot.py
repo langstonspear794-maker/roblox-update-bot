@@ -16,6 +16,19 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 PING_EVERYONE = os.getenv("PING_EVERYONE", "false").lower() == "true"
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")   # free from platform.deepseek.com
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")        # free from console.groq.com
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")      # free from aistudio.google.com/apikey
+
+# Robux package rates (USD -> Robux) — Roblox's published purchase tiers.
+# These can change on Roblox's end; treat as a reference, not a live quote.
+ROBUX_PACKAGES = [
+    {"usd": 4.99,  "robux": 400},
+    {"usd": 9.99,  "robux": 800},
+    {"usd": 19.99, "robux": 1700},
+    {"usd": 49.99, "robux": 4500},
+    {"usd": 99.99, "robux": 10000},
+]
+DEVEX_RATE = 0.0035  # approx USD per Robux when cashing out via DevEx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("roblox-bot")
@@ -330,6 +343,13 @@ class RobloxBot(discord.Client):
     async def get_universe_id(self, place_id: int) -> int | None:
         d = await self._json(ROBLOX_UNIVERSE_URL.format(place_id))
         return d.get("universeId") if d else None
+
+    async def get_random_popular_game(self) -> dict | None:
+        d = await self._json(ROBLOX_GAMES_LIST_URL)
+        if not d: return None
+        games = d.get("games") or d.get("Games") or []
+        if not games: return None
+        return random.choice(games)
 
     async def get_catalog_items(self, limit: int = 8) -> list[dict]:
         d = await self._json(ROBLOX_CATALOG_URL)
@@ -1014,8 +1034,12 @@ class RobloxBot(discord.Client):
         elif cmd == "help":
             em = discord.Embed(title="Bot Help", description=f"Prefix: `{self._prefix}`\nUse slash commands for more features.", colour=0x4cc9f0)
             em.add_field(name="Moderation", value="kick, ban, unban, timeout, warn, warnings, clearwarnings, bannedlist, purge", inline=False)
-            em.add_field(name="Server Management", value="setwelcome, verify, suggest, reactionrole, ticket, giveaway, tempvc", inline=False)
-            em.add_field(name="Other", value="announce, poll, setprefix, stats, ask", inline=False)
+            em.add_field(name="Auto-Mod", value="/automod_addword, /automod_removeword, /automod_toggle, /automod_setpenalty, /automod_strikes", inline=False)
+            em.add_field(name="Anti-Raid", value="/antiraid_on, /antiraid_off, /antiraid_config", inline=False)
+            em.add_field(name="Server Management", value="setwelcome, verify, suggest, reactionrole, ticket, giveaway, tempvc, /setautorole, /dmblast", inline=False)
+            em.add_field(name="Roblox Info", value="/group_info, /badge_info, /badge_check, /random_game, /robux_rates, /trade_calculator", inline=False)
+            em.add_field(name="Admin Tools", value="/auditlog, /backup_settings, /reset_settings, /changelog, /serverstats", inline=False)
+            em.add_field(name="Other", value="announce, poll, setprefix, stats, ask / /ask", inline=False)
             await channel.send(embed=em)
 
         elif cmd == "setprefix":
@@ -1082,9 +1106,21 @@ class RobloxBot(discord.Client):
                 if response is None: response = self._get_chat_response(message.content[len(self._prefix):])
                 await channel.send(response)
 
-    # ================== DEEPSEEK AI ==================
+    # ================== AI CHAT (multi-provider) ==================
     async def _chat_with_llm(self, user_message: str) -> str | None:
-        if not DEEPSEEK_API_KEY: return None
+        """Tries DeepSeek, then Groq, then Gemini — whichever API key is set and responds first."""
+        if DEEPSEEK_API_KEY:
+            r = await self._chat_deepseek(user_message)
+            if r: return r
+        if GROQ_API_KEY:
+            r = await self._chat_groq(user_message)
+            if r: return r
+        if GEMINI_API_KEY:
+            r = await self._chat_gemini(user_message)
+            if r: return r
+        return None
+
+    async def _chat_deepseek(self, user_message: str) -> str | None:
         url = "https://api.deepseek.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
         payload = {
@@ -1102,12 +1138,51 @@ class RobloxBot(discord.Client):
                 if resp.status == 200:
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"]
-                else:
-                    log.warning("DeepSeek API error: %s", resp.status)
-                    return None
+                log.warning("DeepSeek API error: %s", resp.status)
         except Exception as e:
             log.warning("DeepSeek API call failed: %s", e)
-            return None
+        return None
+
+    async def _chat_groq(self, user_message: str) -> str | None:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "system", "content": "You are a friendly, helpful bot in a Discord server. Keep answers concise and fun."},
+                {"role": "user", "content": user_message}
+            ],
+            "max_tokens": 150,
+            "temperature": 0.7
+        }
+        try:
+            s = await self._session_()
+            async with s.post(url, json=payload, headers=headers, timeout=15) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"]
+                log.warning("Groq API error: %s", resp.status)
+        except Exception as e:
+            log.warning("Groq API call failed: %s", e)
+        return None
+
+    async def _chat_gemini(self, user_message: str) -> str | None:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": user_message}]}],
+            "systemInstruction": {"parts": [{"text": "You are a friendly, helpful bot in a Discord server. Keep answers concise and fun."}]},
+            "generationConfig": {"maxOutputTokens": 150, "temperature": 0.7}
+        }
+        try:
+            s = await self._session_()
+            async with s.post(url, json=payload, timeout=15) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                log.warning("Gemini API error: %s", resp.status)
+        except Exception as e:
+            log.warning("Gemini API call failed: %s", e)
+        return None
 
     def _get_chat_response(self, message: str) -> str:
         msg = message.lower().strip()
@@ -2023,6 +2098,444 @@ async def cmd_poll(interaction: discord.Interaction, question: str, option1: str
     message = await interaction.original_response()
     for i in range(len(options)):
         await message.add_reaction(emojis[i])
+
+@bot.tree.command(name="ask", description="Ask the AI chatbot a question")
+@app_commands.describe(question="What do you want to ask?")
+async def cmd_ask(interaction: discord.Interaction, question: str) -> None:
+    bot._command_uses += 1
+    await interaction.response.defer()
+    response = await bot._chat_with_llm(question)
+    if response is None: response = bot._get_chat_response(question)
+    await interaction.followup.send(response)
+
+@bot.tree.command(name="random_game", description="Discover a random popular Roblox game")
+async def cmd_random_game(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    game = await bot.get_random_popular_game()
+    if not game: await interaction.followup.send("❌ Could not fetch a game right now."); return
+    name = game.get("name") or game.get("Name") or "Unknown Game"
+    place_id = game.get("placeId") or game.get("PlaceId") or game.get("rootPlaceId")
+    playing = game.get("playerCount") or game.get("Playing") or game.get("currentPlayers") or 0
+    em = discord.Embed(title=f"🎲 {name}", url=f"https://www.roblox.com/games/{place_id}" if place_id else None,
+                       colour=0xf72585, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="Playing Now", value=f"{playing:,}" if isinstance(playing, (int, float)) else str(playing), inline=True)
+    if place_id: em.add_field(name="Place ID", value=str(place_id), inline=True)
+    em.set_footer(text="Roblox Games List API")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="group_info", description="Look up a Roblox group by ID")
+@app_commands.describe(group_id="Roblox group ID")
+async def cmd_group_info(interaction: discord.Interaction, group_id: str) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    try: gid = int(group_id)
+    except ValueError: await interaction.followup.send("❌ Invalid group ID."); return
+    group = await bot.get_group(gid)
+    if not group: await interaction.followup.send("❌ Could not find that group."); return
+    em = discord.Embed(title=f"🛡️ {group.get('name','Unknown Group')}", url=f"https://www.roblox.com/groups/{gid}",
+                       colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    owner = group.get("owner") or {}
+    em.add_field(name="Owner", value=owner.get("username","None"), inline=True)
+    em.add_field(name="Members", value=f"{group.get('memberCount',0):,}", inline=True)
+    em.add_field(name="Public Entry", value="✅ Yes" if group.get("publicEntryAllowed") else "❌ No", inline=True)
+    if group.get("description"): em.add_field(name="Description", value=group["description"][:300], inline=False)
+    shout = group.get("shout")
+    if shout and shout.get("body"): em.add_field(name="📣 Shout", value=shout["body"][:300], inline=False)
+    em.set_footer(text=f"Group ID: {gid}")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="badge_info", description="Look up a Roblox badge by ID")
+@app_commands.describe(badge_id="Roblox badge ID")
+async def cmd_badge_info(interaction: discord.Interaction, badge_id: str) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    try: bid = int(badge_id)
+    except ValueError: await interaction.followup.send("❌ Invalid badge ID."); return
+    badge = await bot.get_badge(bid)
+    if not badge: await interaction.followup.send("❌ Could not find that badge."); return
+    stats = badge.get("statistics", {})
+    em = discord.Embed(title=f"🏅 {badge.get('displayName') or badge.get('name','Unknown Badge')}",
+                       colour=0xffd166, timestamp=datetime.now(timezone.utc))
+    if badge.get("displayDescription"): em.description = badge["displayDescription"][:300]
+    em.add_field(name="Awarded", value=f"{stats.get('awardedCount',0):,}", inline=True)
+    em.add_field(name="Win Rate", value=f"{stats.get('winRatePercentage',0):.2f}%", inline=True)
+    em.add_field(name="Enabled", value="✅ Yes" if badge.get("enabled") else "❌ No", inline=True)
+    em.set_footer(text=f"Badge ID: {bid}")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="badge_check", description="Check whether a Roblox user owns a specific badge")
+@app_commands.describe(username="Roblox username", badge_id="Roblox badge ID")
+async def cmd_badge_check(interaction: discord.Interaction, username: str, badge_id: str) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+    try: bid = int(badge_id)
+    except ValueError: await interaction.followup.send("❌ Invalid badge ID."); return
+    user = await bot.lookup_user(username)
+    if not user or not user.get("id"): await interaction.followup.send("❌ Could not find that user."); return
+    has_it = await bot.user_has_badge(user["id"], bid)
+    em = discord.Embed(title=f"🏅 Badge Check — {user.get('displayName', username)}",
+                       colour=0x06d6a0 if has_it else 0xe63946)
+    em.description = f"{'✅ Owns' if has_it else '❌ Does not own'} badge `{bid}`."
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="robux_rates", description="Show Roblox Robux purchase package rates")
+async def cmd_robux_rates(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    em = discord.Embed(title="💵 Robux Purchase Rates", colour=0x06d6a0, timestamp=datetime.now(timezone.utc))
+    for pkg in ROBUX_PACKAGES:
+        per_robux = pkg["usd"] / pkg["robux"]
+        em.add_field(name=f"${pkg['usd']:.2f}", value=f"R$ {pkg['robux']:,} (${per_robux*100:.3f}¢ / Robux)", inline=True)
+    em.add_field(name="DevEx Cash-out Rate", value=f"~${DEVEX_RATE:.4f} per Robux (≈ R$ 1,000 → ${1000*DEVEX_RATE:.2f})", inline=False)
+    em.set_footer(text="Reference rates only — check roblox.com for current official pricing")
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="trade_calculator", description="Compare RAP value of two sides of a Roblox trade")
+@app_commands.describe(offering="Asset IDs you're giving, comma-separated", receiving="Asset IDs you're getting, comma-separated")
+async def cmd_trade_calculator(interaction: discord.Interaction, offering: str, receiving: str) -> None:
+    bot._command_uses += 1; await interaction.response.defer()
+
+    async def total_rap(ids_str: str) -> tuple[int, list[str]]:
+        total, names = 0, []
+        for raw in ids_str.split(","):
+            raw = raw.strip()
+            if not raw: continue
+            try: aid = int(raw)
+            except ValueError: continue
+            resale = await bot.get_item_resale(aid)
+            rap = (resale or {}).get("recentAveragePrice") or (resale or {}).get("originalPrice") or 0
+            total += rap
+            names.append(f"#{aid} (R${rap:,})")
+        return total, names
+
+    offer_total, offer_items = await total_rap(offering)
+    receive_total, receive_items = await total_rap(receiving)
+    diff = receive_total - offer_total
+    pct = (diff / offer_total * 100) if offer_total else 0
+    if abs(pct) < 10: verdict, color = "⚖️ Fair Trade", 0xffd166
+    elif diff > 0: verdict, color = "📈 You Win", 0x06d6a0
+    else: verdict, color = "📉 You Lose", 0xe63946
+    em = discord.Embed(title="🔄 Trade Calculator", colour=color, timestamp=datetime.now(timezone.utc))
+    em.add_field(name="You Offer", value="\n".join(offer_items) or "Nothing", inline=True)
+    em.add_field(name="You Receive", value="\n".join(receive_items) or "Nothing", inline=True)
+    em.add_field(name="Totals", value=f"Offering: R${offer_total:,}\nReceiving: R${receive_total:,}\nDiff: {'+' if diff>=0 else ''}{diff:,} ({pct:+.1f}%)", inline=False)
+    em.add_field(name="Verdict", value=verdict, inline=False)
+    em.set_footer(text="Based on Recent Average Price (RAP) — not a guarantee of real trade value")
+    await interaction.followup.send(embed=em)
+
+@bot.tree.command(name="automod_addword", description="Add a word to the auto-mod filter (Admin only)")
+@app_commands.describe(word="Word to add to the filter")
+@admin_check()
+async def cmd_automod_addword(interaction: discord.Interaction, word: str) -> None:
+    bot._command_uses += 1
+    w = word.lower().strip()
+    if not w: await interaction.response.send_message("❌ Provide a word.", ephemeral=True); return
+    if w in bot._automod_words: await interaction.response.send_message(f"⚠️ `{w}` is already in the filter.", ephemeral=True); return
+    bot._automod_words.append(w)
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Added `{w}` to the auto-mod filter. ({len(bot._automod_words)} words total)", ephemeral=True)
+    bot._add_audit("automod_addword", interaction.user, "Added word to filter")
+
+@bot.tree.command(name="automod_removeword", description="Remove a word from the auto-mod filter (Admin only)")
+@app_commands.describe(word="Word to remove from the filter")
+@admin_check()
+async def cmd_automod_removeword(interaction: discord.Interaction, word: str) -> None:
+    bot._command_uses += 1
+    w = word.lower().strip()
+    if w not in bot._automod_words: await interaction.response.send_message(f"❌ `{w}` is not in the filter.", ephemeral=True); return
+    bot._automod_words.remove(w)
+    bot._save_data()
+    await interaction.response.send_message(f"✅ Removed `{w}` from the auto-mod filter. ({len(bot._automod_words)} words left)", ephemeral=True)
+    bot._add_audit("automod_removeword", interaction.user, "Removed word from filter")
+
+@bot.tree.command(name="automod_toggle", description="Enable or disable the auto-mod profanity filter (Admin only)")
+@admin_check()
+async def cmd_automod_toggle(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    bot._automod_enabled = not bot._automod_enabled
+    bot._save_data()
+    state = "✅ Enabled" if bot._automod_enabled else "❌ Disabled"
+    await interaction.response.send_message(f"Auto-mod is now **{state}**.")
+    bot._add_audit("automod_toggle", interaction.user, f"Auto-mod -> {state}")
+
+@bot.tree.command(name="automod_setpenalty", description="Set the 3rd-strike penalty: kick or 7-day timeout (Admin only)")
+@app_commands.describe(penalty="Penalty for reaching 3 strikes")
+@app_commands.choices(penalty=[
+    app_commands.Choice(name="Kick", value="kick"),
+    app_commands.Choice(name="7-day timeout", value="timeout_week"),
+])
+@admin_check()
+async def cmd_automod_setpenalty(interaction: discord.Interaction, penalty: app_commands.Choice[str]) -> None:
+    bot._command_uses += 1
+    bot._automod_penalty = penalty.value
+    bot._save_data()
+    await interaction.response.send_message(f"✅ 3-strike penalty set to **{penalty.name}**.")
+    bot._add_audit("automod_setpenalty", interaction.user, f"Penalty -> {penalty.value}")
+
+@bot.tree.command(name="automod_strikes", description="Show the auto-mod strike leaderboard and recent log")
+@mod_check()
+async def cmd_automod_strikes(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    em = discord.Embed(title="🤬 Auto-Mod Strikes", colour=0xe63946, timestamp=datetime.now(timezone.utc))
+    if bot._automod_strikes:
+        top = sorted(bot._automod_strikes.items(), key=lambda x: x[1], reverse=True)[:10]
+        board = "\n".join(f"<@{uid}> — {count} strike(s)" for uid, count in top if count > 0)
+        em.add_field(name="Leaderboard", value=board or "No active strikes.", inline=False)
+    else:
+        em.add_field(name="Leaderboard", value="No active strikes.", inline=False)
+    if bot._automod_log:
+        recent = bot._automod_log[-10:][::-1]
+        log_text = "\n".join(f"`{e['ts'][:16]}` {e['user']} — {e['action']}" for e in recent)
+        em.add_field(name="Recent Actions", value=log_text[:1024], inline=False)
+    else:
+        em.add_field(name="Recent Actions", value="No recent auto-mod actions.", inline=False)
+    em.set_footer(text=f"Auto-mod is currently {'enabled' if bot._automod_enabled else 'disabled'}")
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="antiraid_on", description="Manually enable anti-raid lockdown (Admin only)")
+@admin_check()
+async def cmd_antiraid_on(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    bot._antiraid_enabled = True
+    em = discord.Embed(title="🚨 Anti-Raid Lockdown Enabled",
+                       description=f"New joins will be **{bot._antiraid_action}ed** until disabled with `/antiraid_off`.",
+                       colour=0xe63946)
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("antiraid_on", interaction.user, "Manually enabled lockdown")
+    await bot._log_action(em)
+
+@bot.tree.command(name="antiraid_off", description="Disable anti-raid lockdown (Admin only)")
+@admin_check()
+async def cmd_antiraid_off(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    bot._antiraid_enabled = False
+    bot._join_times.clear()
+    em = discord.Embed(title="✅ Anti-Raid Lockdown Disabled", colour=0x06d6a0)
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("antiraid_off", interaction.user, "Manually disabled lockdown")
+    await bot._log_action(em)
+
+@bot.tree.command(name="antiraid_config", description="Configure anti-raid auto-trigger settings (Admin only)")
+@app_commands.describe(threshold="Joins within the window to auto-trigger lockdown", window="Window size in seconds",
+                        action="Action taken on new members during lockdown", auto="Auto-trigger lockdown on burst joins")
+@app_commands.choices(action=[
+    app_commands.Choice(name="Kick", value="kick"),
+    app_commands.Choice(name="Ban", value="ban"),
+])
+@admin_check()
+async def cmd_antiraid_config(interaction: discord.Interaction, threshold: int | None = None,
+                              window: int | None = None, action: app_commands.Choice[str] | None = None,
+                              auto: bool | None = None) -> None:
+    bot._command_uses += 1
+    if threshold is not None: bot._antiraid_threshold = max(2, threshold)
+    if window is not None: bot._antiraid_window = max(2, window)
+    if action is not None: bot._antiraid_action = action.value
+    if auto is not None: bot._antiraid_auto = auto
+    bot._save_data()
+    em = discord.Embed(title="🛡️ Anti-Raid Config Updated", colour=0x4cc9f0)
+    em.add_field(name="Auto-trigger", value="✅ On" if bot._antiraid_auto else "❌ Off", inline=True)
+    em.add_field(name="Threshold", value=f"{bot._antiraid_threshold} joins", inline=True)
+    em.add_field(name="Window", value=f"{bot._antiraid_window}s", inline=True)
+    em.add_field(name="Action", value=bot._antiraid_action.title(), inline=True)
+    await interaction.response.send_message(embed=em)
+    bot._add_audit("antiraid_config", interaction.user,
+                   f"threshold={bot._antiraid_threshold} window={bot._antiraid_window} action={bot._antiraid_action} auto={bot._antiraid_auto}")
+
+@bot.tree.command(name="setautorole", description="Set the role automatically given to new members (Admin only)")
+@app_commands.describe(role="Role to assign on join (leave blank to clear)")
+@admin_check()
+async def cmd_setautorole(interaction: discord.Interaction, role: discord.Role | None = None) -> None:
+    bot._command_uses += 1
+    bot._autorole_id = role.id if role else None
+    bot._save_data()
+    if role: await interaction.response.send_message(f"✅ New members will automatically get {role.mention}.")
+    else: await interaction.response.send_message("✅ Auto-role cleared.")
+    bot._add_audit("setautorole", interaction.user, f"Autorole -> {role}" if role else "Autorole cleared")
+
+@bot.tree.command(name="serverstats", description="Show stats about this server")
+async def cmd_serverstats(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    guild = interaction.guild
+    if not guild: await interaction.response.send_message("❌ Must be used in a server.", ephemeral=True); return
+    humans = sum(1 for m in guild.members if not m.bot)
+    bots = sum(1 for m in guild.members if m.bot)
+    em = discord.Embed(title=f"📊 {guild.name} — Server Stats", colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    if guild.icon: em.set_thumbnail(url=guild.icon.url)
+    em.add_field(name="Members", value=f"{guild.member_count} ({humans} humans, {bots} bots)", inline=True)
+    em.add_field(name="Channels", value=f"{len(guild.text_channels)} text, {len(guild.voice_channels)} voice", inline=True)
+    em.add_field(name="Roles", value=str(len(guild.roles)), inline=True)
+    em.add_field(name="Boosts", value=f"Level {guild.premium_tier} ({guild.premium_subscription_count or 0} boosts)", inline=True)
+    em.add_field(name="Created", value=f"<t:{int(guild.created_at.timestamp())}:R>", inline=True)
+    em.add_field(name="Owner", value=f"<@{guild.owner_id}>" if guild.owner_id else "?", inline=True)
+    em.set_footer(text=f"Server ID: {guild.id}")
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="changelog", description="Show the recent Roblox client version changelog")
+async def cmd_changelog(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    em = discord.Embed(title="📋 Roblox Version Changelog", colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    if bot._client_changelog:
+        for entry in reversed(bot._client_changelog[-10:]):
+            em.add_field(name=entry["time"], value=f"`{entry['version']}`", inline=False)
+    else:
+        em.description = "No version changes recorded yet since the bot started."
+    em.add_field(name="Current Version", value=f"`{bot._last_client_version or 'N/A'}`", inline=False)
+    await interaction.response.send_message(embed=em)
+
+@bot.tree.command(name="auditlog", description="Show recent bot action audit log")
+@app_commands.describe(count="Number of recent entries to show (max 20)")
+@mod_check()
+async def cmd_auditlog(interaction: discord.Interaction, count: int = 10) -> None:
+    bot._command_uses += 1
+    count = max(1, min(count, 20))
+    entries = bot._audit_log[-count:][::-1]
+    em = discord.Embed(title="📜 Audit Log", colour=0x4cc9f0, timestamp=datetime.now(timezone.utc))
+    if entries:
+        for e in entries:
+            em.add_field(name=f"{e['time']} — {e['action']}", value=f"By: {e['by']}\n{e.get('detail','')}"[:1024], inline=False)
+    else:
+        em.description = "No audit log entries yet."
+    em.set_footer(text=f"Showing {len(entries)} of {len(bot._audit_log)} total entries")
+    await interaction.response.send_message(embed=em, ephemeral=True)
+
+@bot.tree.command(name="backup_settings", description="Export all bot settings as a JSON file (Admin only)")
+@admin_check()
+async def cmd_backup_settings(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+    await interaction.response.defer(ephemeral=True)
+    data = {
+        "warnings": bot._warnings, "log_channel_id": bot._log_channel_id, "audit_log": bot._audit_log,
+        "ping_role_id": bot._ping_role_id, "autorole_id": bot._autorole_id, "scheduled": bot._scheduled,
+        "prefix": bot._prefix, "filters": bot._filters, "alert_threshold": bot._alert_threshold,
+        "watched_items": {str(k): v for k, v in bot._watched_items.items()},
+        "antiraid_auto": bot._antiraid_auto, "antiraid_threshold": bot._antiraid_threshold,
+        "antiraid_window": bot._antiraid_window, "antiraid_action": bot._antiraid_action,
+        "mod_role_id": bot._mod_role_id, "admin_role_id": bot._admin_role_id,
+        "automod_enabled": bot._automod_enabled, "automod_words": bot._automod_words,
+        "automod_penalty": bot._automod_penalty, "automod_log": bot._automod_log,
+        "reports": bot._reports, "banned_users": bot._banned_users,
+        "welcome_channel_id": bot._welcome_channel_id, "welcome_message": bot._welcome_message,
+        "verified_role_id": bot._verified_role_id, "suggestion_channel_id": bot._suggestion_channel_id,
+        "reaction_roles": bot._reaction_roles, "giveaways": bot._giveaways, "temp_vcs": bot._temp_vcs,
+        "ticket_counter": bot._ticket_counter,
+    }
+    buf = io.BytesIO(json.dumps(data, indent=2).encode("utf-8"))
+    fname = f"bot_settings_backup_{int(time.time())}.json"
+    await interaction.followup.send("✅ Here's your settings backup.", file=discord.File(buf, filename=fname), ephemeral=True)
+    bot._add_audit("backup_settings", interaction.user, "Exported settings backup")
+
+@bot.tree.command(name="reset_settings", description="Reset ALL bot settings to defaults (Admin only, irreversible)")
+@admin_check()
+async def cmd_reset_settings(interaction: discord.Interaction) -> None:
+    bot._command_uses += 1
+
+    class ConfirmReset(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=30)
+            self.confirmed: bool | None = None
+
+        @discord.ui.button(label="Reset everything", style=discord.ButtonStyle.danger)
+        async def confirm(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+            if btn_interaction.user.id != interaction.user.id:
+                return await btn_interaction.response.send_message("❌ Only the command author can confirm.", ephemeral=True)
+            self.confirmed = True
+            self.stop()
+            await btn_interaction.response.edit_message(content="🗑️ Settings reset.", view=None)
+
+        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+        async def cancel(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+            if btn_interaction.user.id != interaction.user.id:
+                return await btn_interaction.response.send_message("❌ Only the command author can confirm.", ephemeral=True)
+            self.confirmed = False
+            self.stop()
+            await btn_interaction.response.edit_message(content="❌ Reset cancelled.", view=None)
+
+    view = ConfirmReset()
+    await interaction.response.send_message(
+        "⚠️ This will reset **all** warnings, ban list, auto-mod words, filters, roles, welcome message, etc. to defaults. "
+        "This cannot be undone.\nConsider running `/backup_settings` first.",
+        view=view, ephemeral=True,
+    )
+    await view.wait()
+    if not view.confirmed:
+        return
+    bot._warnings = {}
+    bot._log_channel_id = None
+    bot._audit_log = []
+    bot._ping_role_id = None
+    bot._autorole_id = None
+    bot._scheduled = []
+    bot._prefix = PREFIX
+    bot._filters = {"client": True, "devforum": True, "incident": True}
+    bot._alert_threshold = 0.0
+    bot._watched_items = {}
+    bot._antiraid_auto = True
+    bot._antiraid_threshold = 10
+    bot._antiraid_window = 10
+    bot._antiraid_action = "kick"
+    bot._mod_role_id = None
+    bot._admin_role_id = None
+    bot._automod_enabled = True
+    bot._automod_words = list(DEFAULT_BAD_WORDS)
+    bot._automod_strikes = {}
+    bot._automod_penalty = "timeout_week"
+    bot._automod_log = []
+    bot._reports = []
+    bot._banned_users = {}
+    bot._welcome_channel_id = None
+    bot._welcome_message = "Welcome {mention} to **{server}**! Enjoy your stay."
+    bot._verified_role_id = None
+    bot._suggestion_channel_id = None
+    bot._reaction_roles = {}
+    bot._giveaways = {}
+    bot._temp_vcs = {}
+    bot._ticket_counter = 0
+    bot._save_data()
+    await interaction.followup.send("✅ All settings have been reset to defaults.", ephemeral=True)
+    bot._add_audit("reset_settings", interaction.user, "Full settings reset")
+
+@bot.tree.command(name="dmblast", description="Send a DM to every member in this server (Admin only)")
+@app_commands.describe(message="Message to send to all members")
+@admin_check()
+async def cmd_dmblast(interaction: discord.Interaction, message: str) -> None:
+    bot._command_uses += 1
+    guild = interaction.guild
+    if not guild: await interaction.response.send_message("❌ Must be used in a server.", ephemeral=True); return
+    members = [m for m in guild.members if not m.bot]
+
+    class ConfirmBlast(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=30)
+            self.confirmed: bool | None = None
+
+        @discord.ui.button(label="Send to all", style=discord.ButtonStyle.danger)
+        async def confirm(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+            if btn_interaction.user.id != interaction.user.id:
+                return await btn_interaction.response.send_message("❌ Only the command author can confirm.", ephemeral=True)
+            self.confirmed = True
+            self.stop()
+            await btn_interaction.response.edit_message(content="📨 Sending DMs... this may take a while.", view=None)
+
+        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+        async def cancel(self, btn_interaction: discord.Interaction, button: discord.ui.Button):
+            if btn_interaction.user.id != interaction.user.id:
+                return await btn_interaction.response.send_message("❌ Only the command author can confirm.", ephemeral=True)
+            self.confirmed = False
+            self.stop()
+            await btn_interaction.response.edit_message(content="❌ DM blast cancelled.", view=None)
+
+    view = ConfirmBlast()
+    await interaction.response.send_message(
+        f"⚠️ This will DM **{len(members)}** member(s) with:\n> {message}\n\nConfirm?", view=view, ephemeral=True
+    )
+    await view.wait()
+    if not view.confirmed: return
+    sent, failed = 0, 0
+    for member in members:
+        try:
+            await member.send(f"📢 **Message from {guild.name} staff:**\n{message}")
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(1.0)
+    await interaction.followup.send(f"✅ DM blast complete. Sent: **{sent}** | Failed: **{failed}**", ephemeral=True)
+    bot._add_audit("dmblast", interaction.user, f"Blasted {len(members)} members: {message[:80]}")
 
 # ================== ENTRY POINT ==================
 if __name__ == "__main__":
