@@ -1108,19 +1108,27 @@ class RobloxBot(discord.Client):
 
     # ================== AI CHAT (multi-provider) ==================
     async def _chat_with_llm(self, user_message: str) -> str | None:
-        """Tries DeepSeek, then Groq, then Gemini — whichever API key is set and responds first."""
-        if DEEPSEEK_API_KEY:
-            r = await self._chat_deepseek(user_message)
-            if r: return r
-        if GROQ_API_KEY:
-            r = await self._chat_groq(user_message)
-            if r: return r
-        if GEMINI_API_KEY:
-            r = await self._chat_gemini(user_message)
-            if r: return r
+        """Tries DeepSeek, then Groq, then Gemini — whichever API key is set and responds first.
+        Returns None if all providers fail or no keys are configured; caller should use local fallback."""
+        if not user_message or not user_message.strip():
+            return None
+        try:
+            if DEEPSEEK_API_KEY:
+                r = await self._chat_deepseek(user_message)
+                if r: return r
+            if GROQ_API_KEY:
+                r = await self._chat_groq(user_message)
+                if r: return r
+            if GEMINI_API_KEY:
+                r = await self._chat_gemini(user_message)
+                if r: return r
+        except Exception as e:
+            log.warning("_chat_with_llm unexpected error: %s", e)
         return None
 
     async def _chat_deepseek(self, user_message: str) -> str | None:
+        if not DEEPSEEK_API_KEY:
+            return None
         url = "https://api.deepseek.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
         payload = {
@@ -1134,11 +1142,18 @@ class RobloxBot(discord.Client):
         }
         try:
             s = await self._session_()
-            async with s.post(url, json=payload, headers=headers, timeout=15) as resp:
+            async with s.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"]
-                log.warning("DeepSeek API error: %s", resp.status)
+                elif resp.status == 402:
+                    log.warning("DeepSeek API error 402: payment/quota issue — skipping DeepSeek")
+                elif resp.status == 401:
+                    log.warning("DeepSeek API error 401: invalid API key — skipping DeepSeek")
+                else:
+                    log.warning("DeepSeek API error %s — skipping", resp.status)
+        except asyncio.TimeoutError:
+            log.warning("DeepSeek API timed out — skipping")
         except Exception as e:
             log.warning("DeepSeek API call failed: %s", e)
         return None
@@ -1157,11 +1172,13 @@ class RobloxBot(discord.Client):
         }
         try:
             s = await self._session_()
-            async with s.post(url, json=payload, headers=headers, timeout=15) as resp:
+            async with s.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"]
-                log.warning("Groq API error: %s", resp.status)
+                log.warning("Groq API error %s — skipping", resp.status)
+        except asyncio.TimeoutError:
+            log.warning("Groq API timed out — skipping")
         except Exception as e:
             log.warning("Groq API call failed: %s", e)
         return None
@@ -1175,11 +1192,13 @@ class RobloxBot(discord.Client):
         }
         try:
             s = await self._session_()
-            async with s.post(url, json=payload, timeout=15) as resp:
+            async with s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["candidates"][0]["content"]["parts"][0]["text"]
-                log.warning("Gemini API error: %s", resp.status)
+                log.warning("Gemini API error %s — skipping", resp.status)
+        except asyncio.TimeoutError:
+            log.warning("Gemini API timed out — skipping")
         except Exception as e:
             log.warning("Gemini API call failed: %s", e)
         return None
@@ -1365,7 +1384,9 @@ class RobloxBot(discord.Client):
     async def on_ready(self) -> None:
         if not self.user: return
         self._start_time = time.time()
-        log.info("Logged in as %s (%s)", self.user, self.user.id)
+        log.info("Logged in as %s (%s) | Servers: %d", self.user, self.user.id, len(self.guilds))
+
+        # Sync slash commands to every guild the bot is already in
         for guild in self.guilds:
             try:
                 self.tree.copy_global_to(guild=guild)
@@ -1373,17 +1394,93 @@ class RobloxBot(discord.Client):
                 log.info("Synced commands to guild %s (%s)", guild.name, guild.id)
             except Exception as e:
                 log.warning("Failed to sync to guild %s: %s", guild.id, e)
-        channel = self.get_channel(self.update_channel_id)
-        if isinstance(channel, discord.abc.Messageable):
-            cv = await self.get_client_version()
-            em = discord.Embed(
-                title="🚀 Roblox Update Tracker — Online",
-                description="Bot is online and monitoring for updates!",
-                colour=0x4cc9f0, timestamp=datetime.now(timezone.utc),
-            )
-            em.add_field(name="🎮 Client", value=f"`{cv or 'N/A'}`", inline=True)
-            em.set_footer(text=f"Polling every 15 min")
-            await channel.send(embed=em)
+
+        # Post online notification to the configured update channel (if set)
+        if self.update_channel_id:
+            channel = self.get_channel(self.update_channel_id)
+            if isinstance(channel, discord.abc.Messageable):
+                cv = await self.get_client_version()
+                em = discord.Embed(
+                    title="🚀 Roblox Update Tracker — Online",
+                    description="Bot is online and monitoring for updates!",
+                    colour=0x4cc9f0, timestamp=datetime.now(timezone.utc),
+                )
+                em.add_field(name="🎮 Client", value=f"`{cv or 'N/A'}`", inline=True)
+                em.set_footer(text="Polling every 15 min")
+                try:
+                    await channel.send(embed=em)
+                except Exception as e:
+                    log.warning("Failed to send online notification: %s", e)
+        else:
+            log.warning("update_channel_id is not set — use /set_update_channel to configure alerts")
+            # Post setup guidance to the first writable channel in each guild
+            for guild in self.guilds:
+                await self._post_setup_guide(guild)
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        """Called when the bot is invited to a new server."""
+        log.info("Joined new guild: %s (%s) | Members: %d", guild.name, guild.id, guild.member_count)
+        # Sync slash commands to the new guild immediately
+        try:
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            log.info("Synced commands to new guild %s (%s)", guild.name, guild.id)
+        except Exception as e:
+            log.warning("Failed to sync commands to new guild %s: %s", guild.id, e)
+        # Post setup guidance so admins know what to configure
+        await self._post_setup_guide(guild)
+
+    async def _post_setup_guide(self, guild: discord.Guild) -> None:
+        """Find the first channel the bot can write to and post a setup guide."""
+        em = discord.Embed(
+            title="👋 Thanks for adding Roblox Update Tracker!",
+            description=(
+                "I'm ready to track Roblox updates, moderate your server, and more — "
+                "but I need a quick one-time setup first."
+            ),
+            colour=0x4cc9f0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        em.add_field(
+            name="1️⃣  Set the update channel (required)",
+            value="Use `/set_update_channel #channel-name` to tell me where to post Roblox update alerts.",
+            inline=False,
+        )
+        em.add_field(
+            name="2️⃣  Optional extras",
+            value=(
+                "`/set_log_channel` — mod-action logs\n"
+                "`/set_mod_role` — who can use mod commands\n"
+                "`/set_admin_role` — who can use admin commands\n"
+                "`/set_autorole` — role given to new members"
+            ),
+            inline=False,
+        )
+        em.add_field(
+            name="📖 All commands",
+            value="Type `/` to browse every available slash command.",
+            inline=False,
+        )
+        em.set_footer(text="Roblox Update Tracker • setup guide")
+
+        # Try system channel first, then iterate text channels
+        candidates: list[discord.TextChannel] = []
+        if guild.system_channel:
+            candidates.append(guild.system_channel)
+        for ch in guild.text_channels:
+            if ch not in candidates:
+                candidates.append(ch)
+
+        for ch in candidates:
+            perms = ch.permissions_for(guild.me)
+            if perms.send_messages and perms.view_channel:
+                try:
+                    await ch.send(embed=em)
+                    log.info("Posted setup guide to #%s in %s (%s)", ch.name, guild.name, guild.id)
+                    return
+                except Exception as e:
+                    log.warning("Could not post setup guide to #%s in %s: %s", ch.name, guild.name, e)
+        log.warning("Could not find a writable channel to post setup guide in %s (%s)", guild.name, guild.id)
 
 # ================== BOT INSTANCE ==================
 bot = RobloxBot()
